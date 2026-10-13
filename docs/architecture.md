@@ -1,0 +1,39 @@
+# Architecture & validation roadmap
+
+## Geometric truth model
+
+Coordinate system: **meters**, origin at the center of home plate's 17-inch bounding square, X laterally toward first-base side, Y up, and Z toward catcher. The real plate's *pentagon* is extruded between measured bottom/top strike-zone bounds. The demo uses illustrative (not measured) batter presets; the user can override both heights. Actual league rules differ. Do **not** use the preset heights to make live calls.
+
+The rendering code consumes pure `makeZone()` geometry. Camera input is a **different concern**:
+- **Desktop**: Three.js orbit camera, for inspecting shape and calibration.
+- **WebXR experimental**: use XR hit-test to manually place plate center on a detected plane; adjust plate yaw. Requires supported browser/device + HTTPS. Single hit test cannot identify a plate or prove 6DoF registration accuracy.
+- **GoPro/offline**: `projectZone()` accepts independently determined camera intrinsics and row-major world-to-camera matrices; see `tools/overlay_video.py`.
+
+Future adapter boundary: each input source should produce a calibrated camera/plate pose with timestamp + covariance/confidence, without modifying geometry. Offline pose estimation may use fiducials, homography for the ground plane, PnP, or SLAM—but those are **not implemented**. A plane-only homography will not correctly position a 3D elevated strike-zone volume.
+
+## Critical safety/integrity gates
+
+1. Require physical calibration of plate dimensions and camera intrinsics for any real-world overlay.
+2. Detect head translation/rotation and reject drift; do not treat IMU-only yaw or a single point as stable registration.
+3. Independently validate overlay error against a measured target (goal under 1 inch in the plate plane; NOT established).
+4. Fade/hide if tracking confidence fails. Current POC has no calibrated confidence estimates.
+5. Comply with venue/rulebook guidance before wearing any device behind the plate, and avoid occluding pitches.
+
+## Proposed experiments
+
+- Bench: known-size checkerboard/AprilTag arrangement on the plate to measure reprojection error at multiple viewpoints.
+- On field: tracked references at front/middle/back of plate; assess translation during an umpire's normal stance.
+- Batter calibration: compare manually measured shoulder/pants/knee landmarks to estimated pose; freeze bounds only after stance established.
+- GoPro: offline estimation with recorded camera trajectory plus time-aligned frames.
+- Hardware: evaluate real 6DoF passthrough headset, then smaller displays only after registration test.
+
+## Commands
+
+```bash
+npm install
+npm test
+npm run dev
+npm run build
+```
+
+Open the Vite URL in a desktop browser for simulator. For WebXR AR use an HTTPS-served build on a browser with immersive-ar and hit-test support.
