@@ -55,3 +55,26 @@ This overlays a zone on a video **only if** `calibration.json` contains real cam
 **Roadmap:** automated plate detection and precise pose calibration → batter landmark detection and stance lock → confidence/fail-closed tracking → real headset validation → GoPro pose-estimation adapter.
 
 Uses [Three.js](https://threejs.org/) and browser [WebXR hit-testing](https://developer.mozilla.org/en-US/docs/Web/API/XRSession/requestHitTestSource). Requires hardware support; experimental APIs are not universal.
+
+## Phase 2 — Camera calibration, plate registration, and batter stance proposals
+
+**Now available (experimental):**
+- Calibrate real cameras with chessboard images via `tools/calibrate_camera.py`.
+- Generate a physical ArUco reference tag; measure its rigid offset from home plate.
+- Detect the marker and solve a **per-frame 6DoF** world-to-camera transform, using calibrated intrinsics, lens distortion, and physical plausibility checks. Lost tag, insufficient pixels, high reprojection error, or pose discontinuity means **hide the overlay**.
+- Optional `--allow-plate-contour` white pentagon detector for unobstructed benchmark footage; **not a production tracker**.
+- Manually calibrated batter top/bottom bounds; optional **MediaPipe pose-landmark proposals** within a supplied batter ROI, with 8-frame stability lock and an explicit acceptance switch. 2D body ratios are **not metric ground truth** or league-approved strike-zone measurements.
+- `tools/track_video.py` takes recorded video or a webcam source and produces accepted pose metadata plus optional annotated MP4.
+- `review.html` browser tool takes original video plus the generated tracking JSON and renders only accepted camera poses. Vite builds both the simulator and review page.
+
+See **[field calibration and runbook](docs/field-calibration.md)** for measured inputs and commands.
+
+```bash
+python -m pip install -r requirements-cv.txt
+python tools/generate_marker.py --id 0 --output marker.png
+# Measure the marker and camera, then create field.json from docs/field-calibration.md
+python tools/track_video.py --input practice.mp4 --config field.json \
+  --output-video review.mp4 --output-json tracking.json
+```
+
+Unit and synthetic-video tests verify marker detection, physical 6DoF reconstruction, and fail-closed marker loss. **Field accuracy, wearable registration, and batter landmark agreement remain unverified.** Do not use for live pitch adjudication.

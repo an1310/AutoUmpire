@@ -1,0 +1,5 @@
+# Pin during capture deployments. The prototype tests target OpenCV 4.13.
+opencv-contrib-python>=4.10,<5
+numpy>=1.26,<3
+# Optional for --pose-model. A separate .task asset is required.
+# mediapipe>=0.10
