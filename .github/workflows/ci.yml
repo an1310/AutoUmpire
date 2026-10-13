@@ -20,3 +20,19 @@ jobs:
         run: npm test
       - name: Production build
         run: npm run build
+
+  cv-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install calibration and tracking dependencies
+        run: pip install -r requirements-cv.txt
+      - name: Synthetic marker and stance tests
+        run: python -m unittest discover -s tests_py -v
+      - name: Python syntax validation
+        run: python -m compileall -q autoumpire_cv tools/track_video.py tools/calibrate_camera.py tools/generate_marker.py
