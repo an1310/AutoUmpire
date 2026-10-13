@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="theme-color" content="#101927"/>
+  <title>AutoUmpire — Spatial Strike-Zone Prototype</title>
+</head>
+<body>
+  <main id="app">
+    <div id="stage"></div>
+    <aside class="panel">
+      <p class="eyebrow">AUT0UMPIRE / POC 01</p>
+      <h1>Strike-zone viewer</h1>
+      <p class="muted">True-scale plate volume · input-independent geometry</p>
+      <label for="batter">Batter preset</label>
+      <select id="batter">
+        <option value="short">5′0″ batter</option>
+        <option value="tall">6′3″ batter</option>
+      </select>
+      <label for="bottom">Bottom of zone <output id="bottomOut"></output></label>
+      <input type="range" id="bottom" min="0.20" max="0.85" step="0.01"/>
+      <label for="top">Top of zone <output id="topOut"></output></label>
+      <input type="range" id="top" min="0.6" max="1.60" step="0.01"/>
+      <label for="yaw">Plate heading <output id="yawOut"></output></label>
+      <input type="range" id="yaw" min="-180" max="180" step="1" value="0"/>
+      <label><input type="checkbox" id="batterVisible" checked/> Show batter silhouette</label>
+      <p id="status" role="status">Desktop simulation: drag to orbit, scroll to zoom.</p>
+      <div id="ar-button-container"></div>
+      <p class="small">AR: point at the center of home plate, tap/select to place. Adjust heading manually. Hide the overlay if alignment is uncertain. Not for officiating.</p>
+    </aside>
+    <footer>Experimental visualization only • No automatic plate localization, pose measurement, or ball/strike decisions</footer>
+  </main>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
