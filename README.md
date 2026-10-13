@@ -61,6 +61,7 @@ Uses [Three.js](https://threejs.org/) and browser [WebXR hit-testing](https://de
 **Now available (experimental):**
 - Calibrate real cameras with chessboard images via `tools/calibrate_camera.py`.
 - Generate a physical ArUco reference tag; measure its rigid offset from home plate.
+- Plan and use a **multi-marker layout** (4 recommended), fit jointly, with displaced-marker rejection; `tools/simulate_registration.py` predicts overlay error for a layout and viewpoint.
 - Detect the marker and solve a **per-frame 6DoF** world-to-camera transform, using calibrated intrinsics, lens distortion, and physical plausibility checks. Lost tag, insufficient pixels, high reprojection error, or pose discontinuity means **hide the overlay**.
 - Optional `--allow-plate-contour` white pentagon detector for unobstructed benchmark footage; **not a production tracker**.
 - Manually calibrated batter top/bottom bounds; optional **MediaPipe pose-landmark proposals** within a supplied batter ROI, with 8-frame stability lock and an explicit acceptance switch. 2D body ratios are **not metric ground truth** or league-approved strike-zone measurements.
@@ -71,8 +72,8 @@ See **[field calibration and runbook](docs/field-calibration.md)** for measured 
 
 ```bash
 python -m pip install -r requirements-cv.txt
-python tools/generate_marker.py --id 0 --output marker.png
-# Measure the marker and camera, then create field.json from docs/field-calibration.md
+python tools/generate_marker.py --id 0 1 2 3 --output marker-{id}.png
+# Measure the markers and camera, then create field.json from docs/field-calibration.md
 python tools/track_video.py --input practice.mp4 --config field.json \
   --output-video review.mp4 --output-json tracking.json
 ```

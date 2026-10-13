@@ -35,4 +35,4 @@ jobs:
       - name: Synthetic marker and stance tests
         run: python -m unittest discover -s tests_py -v
       - name: Python syntax validation
-        run: python -m compileall -q autoumpire_cv tools/track_video.py tools/calibrate_camera.py tools/generate_marker.py
+        run: python -m compileall -q autoumpire_cv tools/track_video.py tools/calibrate_camera.py tools/generate_marker.py tools/simulate_registration.py

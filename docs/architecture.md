@@ -11,6 +11,18 @@ The rendering code consumes pure `makeZone()` geometry. Camera input is a **diff
 
 Future adapter boundary: each input source should produce a calibrated camera/plate pose with timestamp + covariance/confidence, without modifying geometry. Offline pose estimation may use fiducials, homography for the ground plane, PnP, or SLAM—but those are **not implemented**. A plane-only homography will not correctly position a 3D elevated strike-zone volume.
 
+## Smart-glasses device classes
+
+A world-locked 3D zone needs the display's **6DoF pose at display rate** (≥60 Hz, low motion-to-photon latency). Umpires move their heads while tracking a pitch. That requirement sorts glasses into three classes:
+
+| Class | Examples (verify current SDKs) | What this project can do |
+|---|---|---|
+| Camera, no display | Ray-Ban Meta | Video source for the offline `track_video.py` → `review.html` pipeline. No overlay. |
+| Heads-up display, no world tracking | Meta Ray-Ban Display (developer preview since May 2026; reported 600×600 right-lens panel, UI components or web apps) | Glanceable status only (zone heights, tracking OK/lost). I found no documented 6DoF world tracking, so a 3D zone cannot be world-locked. A head-fixed box would be **misleading**. |
+| 6DoF passthrough or see-through | Passthrough headsets (e.g. Quest 3); see-through 6DoF glasses | The only class that can render the zone world-locked. Use the WebXR path where `immersive-ar` + `hit-test` exist. |
+
+For the 6DoF class, the device's own tracker should drive every displayed frame. Marker registration (`autoumpire_cv`) should only **anchor and periodically correct** the plate pose. A camera pose is not the eye pose: see-through displays also need display-to-eye calibration. None of this fusion is implemented yet.
+
 ## Critical safety/integrity gates
 
 1. Require physical calibration of plate dimensions and camera intrinsics for any real-world overlay.
