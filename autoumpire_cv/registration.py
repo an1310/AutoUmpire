@@ -10,7 +10,8 @@ A marker by itself does NOT locate plate unless this offset is measured.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from itertools import combinations
+from typing import Optional, Sequence, Union
 import math
 import cv2
 import numpy as np
@@ -74,6 +75,8 @@ class Estimate:
     reprojection_px: float
     marker_pixels: float
     method: str = 'aruco'
+    markers_used: tuple = ()
+    markers_dropped: tuple = ()
 
     @property
     def world_to_camera(self) -> np.ndarray:
@@ -122,17 +125,40 @@ def fit_pose(object_pts, image_pts, camera:Camera) -> Optional[Estimate]:
     return Estimate(r.copy(),t.copy(),error,perimeter/4)
 
 
+MAX_MARKERS=8
+
+
+def marker_side_px(img) -> float:
+    return float(np.mean(np.linalg.norm(img-np.roll(img,-1,axis=0),axis=1)))
+
+
 class PlateTracker:
     """Marker-observed 6DoF pose; reject discontinuities and hide on missed frames.
 
     No IMU or optical-flow extrapolation; a lost marker means no rendering.
     Acquisition (at start, after loss, or after a pose jump) needs
     ``reacquire_frames`` consecutive consistent poses before anything is shown.
+
+    Several measured ground markers (a "board") are fit as ONE planar PnP problem,
+    which is far better conditioned than a single small tag. Any usable subset of
+    at least ``min_markers`` (default: 3, or all if fewer are configured) may be
+    visible. Markers that disagree with the consensus pose (kicked, mis-measured)
+    are excluded; if too few agree, the overlay is hidden. With only two markers
+    a displacement along their baseline is absorbed by the fit and NOT detected.
     """
-    def __init__(self,camera:Camera,marker:MarkerLocation,*,max_reprojection_px=2.5,
-                 min_marker_side_px=22.0,max_step_m=0.35,max_step_deg=25,reacquire_frames=3):
+    def __init__(self,camera:Camera,marker:Union[MarkerLocation,Sequence[MarkerLocation]],*,
+                 max_reprojection_px=2.5,min_marker_side_px=22.0,max_step_m=0.35,max_step_deg=25,
+                 reacquire_frames=3,min_markers:Optional[int]=None):
         if reacquire_frames<1:raise ValueError('reacquire_frames must be >= 1')
-        self.camera,self.marker=camera,marker
+        markers=(marker,) if isinstance(marker,MarkerLocation) else tuple(marker)
+        if not 1<=len(markers)<=MAX_MARKERS:raise ValueError(f'Layout needs 1..{MAX_MARKERS} markers')
+        ids=[m.marker_id for m in markers]
+        if len(set(ids))!=len(ids):raise ValueError(f'Duplicate marker ids in layout: {ids}')
+        # Three markers are the fewest that can out-vote one displaced marker.
+        if min_markers is None:min_markers=min(3,len(markers))
+        if not 1<=min_markers<=len(markers):raise ValueError('min_markers must be within 1..len(markers)')
+        self.camera,self.markers,self.min_markers=camera,markers,min_markers
+        self.points={m.marker_id:m.points() for m in markers}
         dictionary=cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         params=cv2.aruco.DetectorParameters()
         # OpenCV's default is CORNER_REFINE_NONE; sub-pixel corners directly reduce pose jitter.
@@ -160,16 +186,9 @@ class PlateTracker:
 
     def track(self,frame) -> Optional[Estimate]:
         self.camera.validate_frame(frame)
-        corners,ids,_=self.detector.detectMarkers(frame)
-        if ids is None or self.marker.marker_id not in ids.ravel():
-            return self.lose('marker-not-visible')
-        i=int(np.where(ids.ravel()==self.marker.marker_id)[0][0])
-        img=corners[i].reshape(-1,2)
-        est=fit_pose(self.marker.points(),img,self.camera)
+        est=self.fit_markers(*self.detector.detectMarkers(frame)[:2])
         if est is None:
-            return self.lose('invalid-pose')
-        if est.marker_pixels < self.min_marker_side_px or est.reprojection_px>self.max_reprojection_px:
-            return self.lose('insufficient-observation')
+            return None
         if self.previous is not None:
             if not self.consistent(est,self.previous):
                 # The new pose must earn acceptance like any other (re)acquisition.
@@ -185,6 +204,58 @@ class PlateTracker:
             self.rejected='acquiring';return None
         self.candidates=[];self.previous=est;self.rejected=None
         return est
+
+    def residuals(self,est:Estimate,ids,observed) -> dict:
+        obj=np.vstack([self.points[i] for i in ids])
+        img=np.vstack([observed[i] for i in ids])
+        pixels=project_world(obj,est,self.camera).reshape(len(ids),4,2)
+        rms=np.sqrt(np.mean(np.sum((pixels-img.reshape(len(ids),4,2))**2,axis=2),axis=1))
+        return dict(zip(ids,rms.tolist()))
+
+    def fit_subset(self,ids,observed) -> Optional[Estimate]:
+        return fit_pose(np.vstack([self.points[i] for i in ids]),
+                        np.vstack([observed[i] for i in ids]),self.camera)
+
+    def consensus(self,ids,observed) -> list:
+        """The unique largest subset (>= min_markers) whose joint fit every member obeys.
+
+        Dropping the worst residual of a joint fit is NOT safe: a displaced marker
+        drags the joint pose so the good markers show the largest residuals.
+        Testing subsets directly avoids that masking; layouts are capped at
+        MAX_MARKERS so this stays cheap. Returns [] when no subset passes or the
+        largest passing subset is not unique (a marker indistinguishable from noise).
+        """
+        for size in range(len(ids),self.min_markers-1,-1):
+            passing=[]
+            for subset in combinations(ids,size):
+                est=self.fit_subset(subset,observed)
+                if est is not None and max(self.residuals(est,subset,observed).values())<=self.max_reprojection_px:
+                    passing.append(list(subset))
+            if passing:
+                return passing[0] if len(passing)==1 else []
+        return []
+
+    def fit_markers(self,corners,ids) -> Optional[Estimate]:
+        """Fit every consistent configured marker at once; on failure set ``rejected``."""
+        seen=[] if ids is None else ids.ravel().tolist()
+        observed={}
+        for c,i in zip(corners,seen):
+            # A repeated id (e.g. a second printed copy) cannot be assigned safely.
+            if i in self.points and seen.count(i)==1:observed[i]=c.reshape(-1,2).astype(np.float64)
+        if not observed:
+            return self.lose('marker-not-visible')
+        usable=[i for i in sorted(observed) if marker_side_px(observed[i])>=self.min_marker_side_px]
+        if len(usable)<self.min_markers:
+            return self.lose('insufficient-observation')
+        used=self.consensus(usable,observed)
+        if not used:
+            return self.lose('markers-inconsistent' if self.min_markers>1 else 'insufficient-observation')
+        est=self.fit_subset(used,observed)
+        est.marker_pixels=min(marker_side_px(observed[i]) for i in used)
+        est.markers_used=tuple(used)
+        est.markers_dropped=tuple(i for i in usable if i not in used)
+        return est
+
 
 def project_world(points,pose:Estimate,camera:Camera) -> np.ndarray:
     pixels,_=cv2.projectPoints(np.asarray(points,dtype=np.float64).reshape(-1,3),

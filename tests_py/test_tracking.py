@@ -1,5 +1,7 @@
 """Geometry, stance locking, synthetic calibrated marker detections, rejection tests."""
+import sys
 import unittest
+from pathlib import Path
 import numpy as np
 import cv2
 from autoumpire_cv.registration import Camera,MarkerLocation,PlateTracker,fit_pose,project_world
@@ -7,6 +9,9 @@ from autoumpire_cv.zone import StrikeZone,PLATE_HALF_M
 from autoumpire_cv.batter import StanceLock,Proposal,propose_from_landmarks
 from autoumpire_cv.plate import order_pentagon, detect_plate
 from autoumpire_cv.zone import PLATE_XZ
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
+from track_video import validate_config
+from simulate_registration import simulate
 
 class Tests(unittest.TestCase):
     def setUp(self):
@@ -77,6 +82,78 @@ class Tests(unittest.TestCase):
         # An alternating outlier never reaches the display.
         tr=PlateTracker(self.cam,self.marker,reacquire_frames=3)
         self.assertTrue(all(tr.track(f) is None for f in [a,b,a,b,a,b]))
+
+    BOARD=[MarkerLocation(i,.15,x,z) for i,(x,z) in enumerate([(-.8,0),(.8,0),(-.8,-.9),(.8,-.9)])]
+
+    def board_frame(self,markers):
+        img=np.full((720,1280,3),115,dtype=np.uint8)
+        d=cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        src=np.array([[0,0],[499,0],[499,499],[0,499]],np.float32)
+        for m in markers:
+            c,_=cv2.projectPoints(m.points(),self.rvec,self.T,self.cam.matrix,self.cam.distortion)
+            H=cv2.getPerspectiveTransform(src,c.reshape(4,2).astype('float32'))
+            mk=cv2.aruco.generateImageMarker(d,m.marker_id,500)
+            warped=cv2.warpPerspective(mk,H,(1280,720))
+            stencil=cv2.warpPerspective(np.full_like(mk,255),H,(1280,720))
+            img[stencil>0]=cv2.cvtColor(warped,cv2.COLOR_GRAY2BGR)[stencil>0]
+        return img
+
+    def acquire(self,tracker,frame):
+        for _ in range(tracker.reacquire_frames-1):self.assertIsNone(tracker.track(frame))
+        est=tracker.track(frame)
+        self.assertIsNotNone(est,msg=f'failure: {tracker.rejected}')
+        return est
+
+    def test_board_fits_all_markers_and_tolerates_occlusion(self):
+        est=self.acquire(PlateTracker(self.cam,self.BOARD),self.board_frame(self.BOARD))
+        self.assertEqual(est.markers_used,(0,1,2,3))
+        self.assertLess(np.linalg.norm(est.camera_position-[0,1.75,2.2]),.02)
+        # Marker 1 hidden (e.g. under the batter's foot): the rest still register.
+        est=self.acquire(PlateTracker(self.cam,self.BOARD),self.board_frame(self.BOARD[:1]+self.BOARD[2:]))
+        self.assertEqual(est.markers_used,(0,2,3))
+        self.assertEqual(est.markers_dropped,())
+
+    def test_board_drops_displaced_marker(self):
+        # Marker 3 was kicked 10 cm but the layout still lists its measured spot.
+        moved=self.BOARD[:3]+[MarkerLocation(3,.15,.9,-.9)]
+        est=self.acquire(PlateTracker(self.cam,self.BOARD),self.board_frame(moved))
+        self.assertEqual(est.markers_used,(0,1,2))
+        self.assertEqual(est.markers_dropped,(3,))
+        self.assertLess(np.linalg.norm(est.camera_position-[0,1.75,2.2]),.02)
+
+    def test_board_hides_with_too_few_markers(self):
+        tr=PlateTracker(self.cam,self.BOARD)  # default min_markers=3 for a 4-marker layout
+        self.assertIsNone(tr.track(self.board_frame(self.BOARD[:2])))
+        self.assertEqual(tr.rejected,'insufficient-observation')
+        # Three visible, one displaced: two agreeing markers are not enough.
+        tr=PlateTracker(self.cam,self.BOARD)
+        self.assertIsNone(tr.track(self.board_frame(self.BOARD[:2]+[MarkerLocation(3,.15,.9,-.9)])))
+        self.assertEqual(tr.rejected,'markers-inconsistent')
+        with self.assertRaises(ValueError):PlateTracker(self.cam,[self.BOARD[0],self.BOARD[0]])
+        with self.assertRaises(ValueError):PlateTracker(self.cam,self.BOARD,min_markers=5)
+
+    def test_config_accepts_one_marker_or_a_layout(self):
+        cam={'width':1280,'height':720,'fx':950,'fy':950,'cx':640,'cy':360}
+        zone={'bottom_m':.45,'top_m':1.05}
+        one={'marker_id':0,'side_m':.15,'x_m':-.8,'z_m':0}
+        _,markers,_=validate_config({'camera':cam,'zone':zone,'marker':one})
+        self.assertEqual(len(markers),1)
+        _,markers,_=validate_config({'camera':cam,'zone':zone,'markers':[one,{**one,'marker_id':1,'x_m':.8}]})
+        self.assertEqual([m.marker_id for m in markers],[0,1])
+        for bad in [{'marker':one,'markers':[one]},{},{'markers':[]},{'markers':[{'side_m':.15,'x_m':0,'z_m':0}]}]:
+            with self.assertRaises(ValueError):validate_config({'camera':cam,'zone':zone,**bad})
+
+    def test_layout_simulation_reports_visibility_and_board_advantage(self):
+        zone=StrikeZone(.45,1.05)
+        args=((0,1.75,2.2),(0,.5,-.2),[1.0])
+        single=simulate(self.cam,[self.BOARD[0]],zone,*args,trials=200)
+        board=simulate(self.cam,self.BOARD,zone,*args,trials=200)
+        self.assertTrue(all(m['usable'] for m in board['markers'].values()))
+        self.assertLess(board['noise'][1.0]['zone_err_px_p95'],single['noise'][1.0]['zone_err_px_p95']/3)
+        # Close behind the plate the side markers leave the frame; report, do not guess.
+        near=simulate(self.cam,self.BOARD,zone,(0.3,1.35,0.9),(0,.6,-.5),[1.0],trials=10)
+        self.assertIn('error',near)
+        self.assertFalse(near['markers'][0]['in_frame'])
 
     def test_resolution_mismatch_rejected(self):
         tracker=PlateTracker(self.cam,self.marker)

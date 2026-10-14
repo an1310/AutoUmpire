@@ -28,17 +28,24 @@ from autoumpire_cv.batter import StanceLock
 
 def validate_config(config):
     camera=Camera.from_config(config['camera'])
-    marker_data=config.get('marker')
-    if not isinstance(marker_data,dict) or not all(k in marker_data for k in ('side_m','x_m','z_m')):
-        raise ValueError('Marker dimensions and plate offset must be physically measured')
-    marker=MarkerLocation(**marker_data)
+    if ('marker' in config)==('markers' in config):
+        raise ValueError('Give exactly one of "marker" (single tag) or "markers" (measured layout)')
+    layout=config['markers'] if 'markers' in config else [config['marker']]
+    if not isinstance(layout,list) or not layout:
+        raise ValueError('"markers" must be a non-empty list')
+    for marker_data in layout:
+        if not isinstance(marker_data,dict) or not all(k in marker_data for k in ('marker_id','side_m','x_m','z_m')):
+            raise ValueError('Each marker needs marker_id, side_m, x_m, z_m physically measured')
+    markers=[MarkerLocation(**m) for m in layout]
+    if len(markers)==2:
+        print('WARNING: a 2-marker layout cannot detect a displaced marker; use 3+ (4 recommended).',file=sys.stderr)
     manual=StrikeZone(**config['zone'])
-    return camera,marker,manual
+    return camera,markers,manual
 
 
 def run(args):
     config=json.loads(Path(args.config).read_text())
-    camera,marker,manual=validate_config(config)
+    camera,markers,manual=validate_config(config)
     cap=cv2.VideoCapture(int(args.input) if args.input.isdigit() else args.input)
     if not cap.isOpened():raise RuntimeError(f'Cannot open camera/video: {args.input}')
     fps=cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -60,7 +67,7 @@ def run(args):
                 raise ValueError('batter.model_path, roi and height_m required with --auto-zone')
             from autoumpire_cv.pose_model import BatterEstimator
             estimator=BatterEstimator(cfg['model_path'],float(cfg['height_m']),tuple(cfg['roi']))
-        tracker=PlateTracker(camera,marker)
+        tracker=PlateTracker(camera,markers,min_markers=config.get('min_markers'))
         frame_index=0;active=manual
         while True:
             ok,frame=cap.read()
@@ -90,7 +97,9 @@ def run(args):
                 poses.append({'frame':frame_index,'timestamp_s':frame_index/fps,
                               'world_to_camera':pose.world_to_camera.reshape(-1).tolist(),
                               'zone':{'bottom_m':active.bottom_m,'top_m':active.top_m},
-                              'source':pose.method,'reprojection_px':pose.reprojection_px})
+                              'source':pose.method,'reprojection_px':pose.reprojection_px,
+                              'markers_used':list(pose.markers_used),
+                              'markers_dropped':list(pose.markers_dropped)})
             # Diagnostics are deliberately separate from the strike zone overlay.
             color=(80,220,90) if pose is not None else (50,75,235)
             cv2.putText(frame,f'AutoUmpire {status}'+(' [stance locked]' if lock.locked else ''),
@@ -105,7 +114,7 @@ def run(args):
     result={'schema':'autoumpire-tracking-v1','source':args.input,
             'camera':{'width':camera.width,'height':camera.height,
                       'matrix':camera.matrix.tolist(),'distortion':camera.distortion.ravel().tolist()},
-            'marker':vars(marker),'frames_processed':frame_index,'fps':fps,'poses':poses,
+            'markers':[vars(m) for m in markers],'min_markers':tracker.min_markers,'frames_processed':frame_index,'fps':fps,'poses':poses,
             'diagnostics':diagnostics,
             'limitations':['No marker/plate -> no overlay; no predictive extrapolation',
                            'Monocular pose and image landmarks lack validated real-world overlay accuracy',
