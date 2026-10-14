@@ -34,9 +34,11 @@ class Tests(unittest.TestCase):
         self.assertLess(est.reprojection_px,0.001)
         self.assertLess(np.linalg.norm(est.camera_position-[0,1.75,2.2]),.005)
 
-    def fake_frame(self):
+    def fake_frame(self,rvec=None,T=None):
+        rvec=self.rvec if rvec is None else rvec
+        T=self.T if T is None else T
         marker=cv2.aruco.generateImageMarker(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50),0,500)
-        corners,_=cv2.projectPoints(self.marker.points(),self.rvec,self.T,self.cam.matrix,self.cam.distortion)
+        corners,_=cv2.projectPoints(self.marker.points(),rvec,T,self.cam.matrix,self.cam.distortion)
         # Render a border of white quiet zone surrounding the synthetic marker.
         # Warp flat marker pixels into four projected corners on a gray field.
         img=np.full((720,1280,3),115,dtype=np.uint8)
@@ -49,14 +51,32 @@ class Tests(unittest.TestCase):
         return img
 
     def test_tracker_detects_synthetic_marker_and_fails_closed(self):
-        tr=PlateTracker(self.cam,self.marker)
+        tr=PlateTracker(self.cam,self.marker,reacquire_frames=3)
         frame=self.fake_frame()
+        for _ in range(2):
+            self.assertIsNone(tr.track(frame))
+            self.assertEqual(tr.rejected,'acquiring')
         est=tr.track(frame)
         self.assertIsNotNone(est,msg=f'failure: {tr.rejected}')
         self.assertLess(est.reprojection_px,2.5)
         self.assertIsNone(tr.track(np.full_like(frame,115)))
         self.assertEqual(tr.rejected,'marker-not-visible')
         self.assertIsNone(tr.previous)
+
+    def test_pose_jump_needs_full_reacquisition(self):
+        tr=PlateTracker(self.cam,self.marker,reacquire_frames=3)
+        a=self.fake_frame()
+        # Same orientation, camera shifted 0.6 m sideways: beyond max_step_m.
+        b=self.fake_frame(self.rvec,self.T-self.R@np.array([.6,0,0]))
+        for _ in range(3):tr.track(a)
+        self.assertIsNotNone(tr.previous)
+        self.assertIsNone(tr.track(b));self.assertEqual(tr.rejected,'pose-jump')
+        # Previously the very next frame was accepted with no continuity check.
+        self.assertIsNone(tr.track(b));self.assertEqual(tr.rejected,'acquiring')
+        self.assertIsNotNone(tr.track(b))
+        # An alternating outlier never reaches the display.
+        tr=PlateTracker(self.cam,self.marker,reacquire_frames=3)
+        self.assertTrue(all(tr.track(f) is None for f in [a,b,a,b,a,b]))
 
     def test_resolution_mismatch_rejected(self):
         tracker=PlateTracker(self.cam,self.marker)

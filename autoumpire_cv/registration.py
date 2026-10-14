@@ -126,41 +126,65 @@ class PlateTracker:
     """Marker-observed 6DoF pose; reject discontinuities and hide on missed frames.
 
     No IMU or optical-flow extrapolation; a lost marker means no rendering.
+    Acquisition (at start, after loss, or after a pose jump) needs
+    ``reacquire_frames`` consecutive consistent poses before anything is shown.
     """
     def __init__(self,camera:Camera,marker:MarkerLocation,*,max_reprojection_px=2.5,
-                 min_marker_side_px=22.0,max_step_m=0.35,max_step_deg=25):
+                 min_marker_side_px=22.0,max_step_m=0.35,max_step_deg=25,reacquire_frames=3):
+        if reacquire_frames<1:raise ValueError('reacquire_frames must be >= 1')
         self.camera,self.marker=camera,marker
         dictionary=cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        self.detector=cv2.aruco.ArucoDetector(dictionary,cv2.aruco.DetectorParameters())
+        params=cv2.aruco.DetectorParameters()
+        # OpenCV's default is CORNER_REFINE_NONE; sub-pixel corners directly reduce pose jitter.
+        params.cornerRefinementMethod=cv2.aruco.CORNER_REFINE_SUBPIX
+        self.detector=cv2.aruco.ArucoDetector(dictionary,params)
         self.max_reprojection_px=max_reprojection_px
         self.min_marker_side_px=min_marker_side_px
         self.max_step_m=max_step_m
         self.max_step_deg=max_step_deg
+        self.reacquire_frames=reacquire_frames
         self.previous:Optional[Estimate]=None
+        self.candidates:list[Estimate]=[]
         self.rejected:Optional[str]=None
+
+    def consistent(self,a:Estimate,b:Estimate) -> bool:
+        delta=float(np.linalg.norm(a.camera_position-b.camera_position))
+        Ra,_=cv2.Rodrigues(a.rvec);Rb,_=cv2.Rodrigues(b.rvec)
+        angle=float(math.degrees(math.acos(np.clip((np.trace(Ra@Rb.T)-1)/2,-1,1))))
+        return delta<=self.max_step_m and angle<=self.max_step_deg
+
+    def lose(self,reason:str,seed:Optional[Estimate]=None):
+        self.rejected=reason;self.previous=None
+        self.candidates=[] if seed is None else [seed]
+        return None
 
     def track(self,frame) -> Optional[Estimate]:
         self.camera.validate_frame(frame)
         corners,ids,_=self.detector.detectMarkers(frame)
         if ids is None or self.marker.marker_id not in ids.ravel():
-            self.rejected='marker-not-visible';self.previous=None;return None
+            return self.lose('marker-not-visible')
         i=int(np.where(ids.ravel()==self.marker.marker_id)[0][0])
         img=corners[i].reshape(-1,2)
         est=fit_pose(self.marker.points(),img,self.camera)
         if est is None:
-            self.rejected='invalid-pose';self.previous=None;return None
+            return self.lose('invalid-pose')
         if est.marker_pixels < self.min_marker_side_px or est.reprojection_px>self.max_reprojection_px:
-            self.rejected='insufficient-observation';self.previous=None;return None
+            return self.lose('insufficient-observation')
         if self.previous is not None:
-            delta=float(np.linalg.norm(est.camera_position-self.previous.camera_position))
-            Ra,_=cv2.Rodrigues(est.rvec);Rb,_=cv2.Rodrigues(self.previous.rvec)
-            angle=float(math.degrees(math.acos(np.clip((np.trace(Ra@Rb.T)-1)/2,-1,1))))
-            if delta > self.max_step_m or angle > self.max_step_deg:
-                self.rejected='pose-jump';self.previous=None;return None
-        self.previous=est
-        self.rejected=None
+            if not self.consistent(est,self.previous):
+                # The new pose must earn acceptance like any other (re)acquisition.
+                return self.lose('pose-jump',seed=est)
+            self.previous=est;self.rejected=None
+            return est
+        # After start, loss or a jump, require consecutive mutually consistent
+        # poses so a single (or alternating) IPPE flip is never shown.
+        if self.candidates and not self.consistent(est,self.candidates[-1]):
+            self.candidates=[]
+        self.candidates.append(est)
+        if len(self.candidates)<self.reacquire_frames:
+            self.rejected='acquiring';return None
+        self.candidates=[];self.previous=est;self.rejected=None
         return est
-
 
 def project_world(points,pose:Estimate,camera:Camera) -> np.ndarray:
     pixels,_=cv2.projectPoints(np.asarray(points,dtype=np.float64).reshape(-1,3),

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {INCH_M,PLATE_WIDTH_M,PLATE_DEPTH_M,PRESETS,plateFootprint,makeZone,makeZoneFrame} from '../src/geometry.js';
+import {INCH_M,PLATE_WIDTH_M,PLATE_DEPTH_M,PRESETS,plateFootprint,makeZone,makeZoneFrame,plateFromTwoPoints} from '../src/geometry.js';
 import {projectPoint,projectZone} from '../src/projection.js';
 
 test('home plate spans exactly 17 inches across the front edge',()=>{
@@ -42,4 +42,19 @@ test('projected zone returns up to 15 line segments with a valid pose',()=>{
   const result=projectZone(makeZone(.4,1),w2c,{fx:1000,fy:1000,cx:960,cy:540});
   assert.equal(result.length,15);
   assert.ok(result.every(([a,b])=>[...a,...b].every(Number.isFinite)));
+});
+test('two-tap placement recovers plate center and heading',()=>{
+  const h=PLATE_DEPTH_M/2;
+  const flat=plateFromTwoPoints([0,0,h],[0,0,-h]);
+  assert.deepEqual(flat.position,[0,0,0]);
+  assert.ok(Math.abs(flat.yawRad)<1e-12 && Math.abs(flat.spanErrorM)<1e-12);
+  for(const yaw of [0.3,-1.2,2.9]){
+    // Rotate plate-local apex (0,0,+h) and front (0,0,-h) about +Y, as three.js does.
+    const rot=([x,y,z])=>[x*Math.cos(yaw)+z*Math.sin(yaw),y,-x*Math.sin(yaw)+z*Math.cos(yaw)];
+    const at=([x,y,z])=>[x+1,y+.02,z-3];
+    const r=plateFromTwoPoints(at(rot([0,0,h])),at(rot([0,0,-h])));
+    assert.ok(Math.abs(r.yawRad-yaw)<1e-9);
+    r.position.forEach((v,i)=>assert.ok(Math.abs(v-[1,.02,-3][i])<1e-12));
+  }
+  assert.throws(()=>plateFromTwoPoints([0,0,0],[0,0,.01]),RangeError);
 });

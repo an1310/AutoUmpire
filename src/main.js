@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { ARButton } from 'three/addons/webxr/ARButton.js';
-import { PRESETS, plateFootprint, makeZone } from './geometry.js';
+import { PRESETS, plateFootprint, makeZone, plateFromTwoPoints } from './geometry.js';
 import './style.css';
 
 const stage = document.querySelector('#stage');
@@ -60,13 +60,17 @@ function plate() {
   for(let i=0;i<5;i++){const a=pts[i],b=pts[(i+1)%5];border.push([a[0],.005,a[1]],[b[0],.005,b[1]]);}
   const group=new THREE.Group();
   group.add(surface,line(border,0x233241));
-  return group;
+  return {group,surface};
 }
-origin.add(plate());
+// In AR the opaque virtual plate would hide the real one, which is the only
+// visual check of alignment; keep just its outline there.
+const {group:plateGroup,surface:plateSurface}=plate();
+origin.add(plateGroup);
 
 let zoneMesh=null;
 let batterMesh=null;
 let preset='short';
+let yawRad=0;
 const els={
   batter:document.querySelector('#batter'),
   bottom:document.querySelector('#bottom'),
@@ -121,8 +125,9 @@ function refresh() {
   dispose(batterMesh);
   batterMesh=silhouette(PRESETS[preset].heightM);
   origin.add(batterMesh);
-  batterMesh.visible=els.batterVisible.checked;
-  origin.rotation.y=THREE.MathUtils.degToRad(Number(els.yaw.value));
+  batterMesh.visible=els.batterVisible.checked && !renderer.xr.isPresenting;
+  plateSurface.visible=!renderer.xr.isPresenting;
+  origin.rotation.y=yawRad;
   document.querySelector('#bottomOut').textContent=(bottom/0.0254).toFixed(1)+' in';
   document.querySelector('#topOut').textContent=(top/0.0254).toFixed(1)+' in';
   document.querySelector('#yawOut').textContent=els.yaw.value+'°';
@@ -135,13 +140,17 @@ function applyPreset(){
 }
 els.batter.value='short';
 els.batter.addEventListener('change',()=>{preset=els.batter.value;applyPreset();});
-for(const id of ['top','bottom','yaw','batterVisible'])
+for(const id of ['top','bottom','batterVisible'])
   els[id].addEventListener('input',refresh);
+els.yaw.addEventListener('input',()=>{yawRad=THREE.MathUtils.degToRad(Number(els.yaw.value));refresh();});
 applyPreset();
 
-// AR hit-test placement is deliberately one-shot. The hit result is a floor
-// position, NOT automatic recognition of home plate or a calibrated plate pose.
-let hitSource=null,requesting=false,placed=false;
+// AR placement is two taps: the plate's back tip, then the midpoint of its front
+// edge. That fixes position AND heading, and the tapped span is checked against
+// the real 17-inch centerline. Hit results are surface points, NOT recognition of
+// home plate or a calibrated plate pose.
+const MAX_SPAN_ERROR_M=0.03;
+let hitSource=null,requesting=false,placed=false,apexTap=null;
 const reticle=new THREE.Mesh(new THREE.RingGeometry(.09,.11,32),
   new THREE.MeshBasicMaterial({color:0x7be7ff,side:THREE.DoubleSide}));
 reticle.rotation.x=-Math.PI/2;
@@ -151,31 +160,57 @@ scene.add(reticle);
 const controller=renderer.xr.getController(0);
 scene.add(controller);
 controller.addEventListener('select',()=>{
-  if(!placed && reticle.visible){
-    origin.position.copy(reticle.position);
-    origin.visible=true;
-    reticle.visible=false;
-    placed=true;
-    status.textContent='AR placement set. Heading/boundaries are MANUAL. Re-enter AR to re-place.';
+  if(placed || !reticle.visible) return;
+  const tap=reticle.position.toArray();
+  tap[1]-=.006;
+  if(!apexTap){
+    apexTap=tap;
+    status.textContent='Back tip set. Now tap the MIDDLE of the plate\'s FRONT edge (pitcher side).';
+    return;
   }
+  let pose;
+  try { pose=plateFromTwoPoints(apexTap,tap); }
+  catch(err){ apexTap=null; status.textContent=err.message+'. Tap the back tip again.'; return; }
+  apexTap=null;
+  const errIn=(pose.spanErrorM/0.0254).toFixed(1);
+  if(Math.abs(pose.spanErrorM)>MAX_SPAN_ERROR_M){
+    status.textContent=`Tapped span off by ${errIn} in (limit ${(MAX_SPAN_ERROR_M/0.0254).toFixed(1)} in). Not placed; tap the back tip again.`;
+    return;
+  }
+  origin.position.set(...pose.position);
+  yawRad=pose.yawRad;
+  els.yaw.value=Math.round(THREE.MathUtils.radToDeg(yawRad));
+  refresh();
+  origin.visible=true;
+  reticle.visible=false;
+  placed=true;
+  status.textContent=`AR placement set (span error ${errIn} in). Zone bounds are MANUAL. Re-enter AR to re-place.`;
 });
 renderer.xr.addEventListener('sessionstart',()=>{
   controls.enabled=false;
   ground.visible=false;grid.visible=false;scene.background=null;
   origin.visible=false;reticle.visible=false;
-  requesting=false;hitSource=null;placed=false;
-  status.textContent='AR: aim at center of home plate; tap when cyan reticle is visible.';
+  requesting=false;hitSource=null;placed=false;apexTap=null;
+  refresh();
+  status.textContent='AR: aim at the BACK TIP of home plate (catcher side); tap when the cyan reticle is on it.';
 });
 renderer.xr.addEventListener('sessionend',()=>{
-  hitSource?.cancel();hitSource=null;requesting=false;placed=false;
+  hitSource?.cancel();hitSource=null;requesting=false;placed=false;apexTap=null;
   controls.enabled=true;
   ground.visible=true;grid.visible=true;scene.background=new THREE.Color('#15263a');
   origin.visible=true;origin.position.set(0,0,0);reticle.visible=false;
+  refresh();
   status.textContent='Desktop simulation: drag to orbit, scroll to zoom.';
 });
+// Make the control panel the WebXR DOM overlay so the sliders stay usable in AR.
+// Without this, three's ARButton supplies an overlay holding only an exit button.
+const panel=document.querySelector('.panel');
+// Touches on the panel must not also count as placement taps.
+panel.addEventListener('beforexrselect',e=>e.preventDefault());
 try {
   document.querySelector('#ar-button-container').appendChild(
-    ARButton.createButton(renderer,{requiredFeatures:['hit-test'],optionalFeatures:['local-floor']})
+    ARButton.createButton(renderer,{requiredFeatures:['hit-test'],
+      optionalFeatures:['local-floor','dom-overlay'],domOverlay:{root:panel}})
   );
 } catch (error) {
   status.textContent='AR unavailable in this browser: '+error.message;
