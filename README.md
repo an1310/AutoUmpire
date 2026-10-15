@@ -24,14 +24,9 @@ npm run dev
 
 Visit the URL printed by Vite. Use the controls on the left. On an appropriate WebXR AR device, serve over HTTPS and use the **Start AR** control when available.
 
-### GoPro video (secondary objective)
+### GoPro / recorded video (secondary objective)
 
-```bash
-python -m pip install opencv-python
-python tools/overlay_video.py input.mp4 calibration.json output.mp4
-```
-
-This overlays a zone on a video **only if** `calibration.json` contains real camera intrinsics and a **world-to-camera 4×4 transform for every frame**. No automatic GoPro calibration, ball detection, plate tracking, SLAM, or pose estimation is provided. Missing pose frames are intentionally left without an overlay. See [architecture](docs/architecture.md) and the calibration format in the script docstring. OpenCV output currently has **no audio**.
+Recorded video goes through the calibrated tracker (`tools/track_video.py`, see Phase 2 below) and is reviewed in `review.html`. The tracker logs each frame's real container timestamp, so variable-frame-rate phone video lines up correctly. The earlier `overlay_video.py` helper was removed: it ignored lens distortion, which is large on GoPro wide modes.
 
 ## Important limitations
 
@@ -47,7 +42,7 @@ This overlays a zone on a video **only if** `calibration.json` contains real cam
 | `src/geometry.js` | Pure plate and strike-zone geometry, SI units |
 | `src/projection.js` | Input-independent calibrated 3D-to-image projection |
 | `src/main.js` | Three.js desktop rendering and experimental WebXR placement |
-| `tools/overlay_video.py` | Offline overlay with supplied frame-by-frame poses |
+| `tools/track_video.py` | Marker tracking on recorded or live video; per-frame poses and timestamps |
 | `tests/` | Unit tests for dimensions, geometry, error cases and projection |
 | `docs/strike-zone-preview.svg` | Concept image showing two batter heights |
 | `docs/architecture.md` | Calibration contract, validation and next milestones |

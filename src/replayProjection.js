@@ -36,3 +36,24 @@ export function validTrackingRecord(record) {
     Number.isFinite(record?.reprojection_px) && record.reprojection_px <= 2.5 &&
     record?.zone?.top_m > record?.zone?.bottom_m);
 }
+
+/** Index of the frame shown at playback time `t` (seconds), or -1 if none.
+ * `times` are the ascending per-frame presentation times from the tracker
+ * (frame_times_s). The nearest frame wins, but only within half the local
+ * frame interval, so time past either end of the clip matches nothing.
+ */
+export function frameAtTime(times, t) {
+  if (!Array.isArray(times) || times.length === 0 || !Number.isFinite(t)) return -1;
+  let lo = 0, hi = times.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] < t) lo = mid + 1; else hi = mid;
+  }
+  let i = lo;
+  if (i > 0 && Math.abs(times[i - 1] - t) <= Math.abs(times[i] - t)) i -= 1;
+  const gaps = [];
+  if (i > 0) gaps.push(times[i] - times[i - 1]);
+  if (i < times.length - 1) gaps.push(times[i + 1] - times[i]);
+  const tolerance = gaps.length ? Math.max(...gaps) / 2 : Infinity;
+  return Math.abs(times[i] - t) <= tolerance ? i : -1;
+}
