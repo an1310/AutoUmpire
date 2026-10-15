@@ -22,6 +22,8 @@ npm test
 npm run dev
 ```
 
+`npm run test:ar` drives the real AR placement flow (Start AR → two taps → heading and span check) against an emulated WebXR headset ([IWER](https://www.npmjs.com/package/iwer)) in headless Chromium. Run `npx playwright install chromium` once, or set `CHROMIUM_PATH`. It cannot test the AR control-panel overlay, real tracking or rendering. iOS Safari has no WebXR AR, so test on hardware with an Android ARCore phone or a Quest.
+
 Visit the URL printed by Vite. Use the controls on the left. On an appropriate WebXR AR device, serve over HTTPS and use the **Start AR** control when available.
 
 ### GoPro video (secondary objective)
