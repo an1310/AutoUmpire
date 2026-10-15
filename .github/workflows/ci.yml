@@ -36,3 +36,21 @@ jobs:
         run: python -m unittest discover -s tests_py -v
       - name: Python syntax validation
         run: python -m compileall -q autoumpire_cv tools/track_video.py tools/calibrate_camera.py tools/generate_marker.py tools/simulate_registration.py
+
+  ar-emulation:
+    # Emulated WebXR AR headset (IWER) in headless Chromium: drives the real
+    # two-tap plate placement. Does not cover dom-overlay or real tracking.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+      - name: AR placement under emulation
+        run: npm run test:ar
