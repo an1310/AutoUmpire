@@ -75,6 +75,7 @@ class Estimate:
     reprojection_px: float
     marker_pixels: float
     method: str = 'aruco'
+    timestamp_s: Optional[float] = None
     markers_used: tuple = ()
     markers_dropped: tuple = ()
 
@@ -126,6 +127,7 @@ def fit_pose(object_pts, image_pts, camera:Camera) -> Optional[Estimate]:
 
 
 MAX_MARKERS=8
+NOMINAL_DT=1/30
 
 
 def marker_side_px(img) -> float:
@@ -147,7 +149,7 @@ class PlateTracker:
     a displacement along their baseline is absorbed by the fit and NOT detected.
     """
     def __init__(self,camera:Camera,marker:Union[MarkerLocation,Sequence[MarkerLocation]],*,
-                 max_reprojection_px=2.5,min_marker_side_px=22.0,max_step_m=0.35,max_step_deg=25,
+                 max_reprojection_px=2.5,min_marker_side_px=22.0,max_speed_m_s=10.5,max_turn_deg_s=750.0,
                  reacquire_frames=3,min_markers:Optional[int]=None):
         if reacquire_frames<1:raise ValueError('reacquire_frames must be >= 1')
         markers=(marker,) if isinstance(marker,MarkerLocation) else tuple(marker)
@@ -166,29 +168,38 @@ class PlateTracker:
         self.detector=cv2.aruco.ArucoDetector(dictionary,params)
         self.max_reprojection_px=max_reprojection_px
         self.min_marker_side_px=min_marker_side_px
-        self.max_step_m=max_step_m
-        self.max_step_deg=max_step_deg
+        # Continuity limits are rates, so they mean the same at any frame rate.
+        # Defaults equal the former 0.35 m / 25 deg per frame at 30 fps: they reject
+        # IPPE flips and gross jumps, not ordinary head or camera motion.
+        self.max_speed_m_s=max_speed_m_s
+        self.max_turn_deg_s=max_turn_deg_s
         self.reacquire_frames=reacquire_frames
         self.previous:Optional[Estimate]=None
         self.candidates:list[Estimate]=[]
         self.rejected:Optional[str]=None
 
     def consistent(self,a:Estimate,b:Estimate) -> bool:
+        """``a`` follows ``b``; untimed estimates are treated as NOMINAL_DT apart."""
+        if a.timestamp_s is None or b.timestamp_s is None:dt=NOMINAL_DT
+        else:dt=a.timestamp_s-b.timestamp_s
+        if not dt>0:return False
         delta=float(np.linalg.norm(a.camera_position-b.camera_position))
         Ra,_=cv2.Rodrigues(a.rvec);Rb,_=cv2.Rodrigues(b.rvec)
         angle=float(math.degrees(math.acos(np.clip((np.trace(Ra@Rb.T)-1)/2,-1,1))))
-        return delta<=self.max_step_m and angle<=self.max_step_deg
+        return delta<=self.max_speed_m_s*dt and angle<=self.max_turn_deg_s*dt
 
     def lose(self,reason:str,seed:Optional[Estimate]=None):
         self.rejected=reason;self.previous=None
         self.candidates=[] if seed is None else [seed]
         return None
 
-    def track(self,frame) -> Optional[Estimate]:
+    def track(self,frame,timestamp_s:Optional[float]=None) -> Optional[Estimate]:
+        """``timestamp_s`` is the frame's presentation time; omit only for fixed-rate input."""
         self.camera.validate_frame(frame)
         est=self.fit_markers(*self.detector.detectMarkers(frame)[:2])
         if est is None:
             return None
+        est.timestamp_s=timestamp_s
         if self.previous is not None:
             if not self.consistent(est,self.previous):
                 # The new pose must earn acceptance like any other (re)acquisition.

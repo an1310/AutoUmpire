@@ -63,7 +63,7 @@ python tools/track_video.py --input test.mp4 --config field.json \
   --output-video reviewed.mp4 --output-json poses.json
 ```
 
-The tracking JSON provides **accepted** per-frame world-to-camera transforms, zone bounds and rejection statistics. No tag visible = overlay absent. It makes a plausible pose from a *single planar reference*, not millimeter-accurate tracking. Marker tracking is the safer starting point than shape matching while catchers obscure the plate.
+The tracking JSON provides **accepted** per-frame world-to-camera transforms, zone bounds and rejection statistics. It also records every processed frame's presentation time (`frame_times_s`, from the container, so variable-frame-rate video is handled); `review.html` matches playback to frames by these times. No tag visible = overlay absent. It makes a plausible pose from a *single planar reference*, not millimeter-accurate tracking. Marker tracking is the safer starting point than shape matching while catchers obscure the plate.
 
 ### Optional unmarked plate detection
 

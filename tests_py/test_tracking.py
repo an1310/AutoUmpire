@@ -10,7 +10,7 @@ from autoumpire_cv.batter import StanceLock,Proposal,propose_from_landmarks
 from autoumpire_cv.plate import order_pentagon, detect_plate
 from autoumpire_cv.zone import PLATE_XZ
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
-from track_video import validate_config
+from track_video import FrameClock,validate_config
 from simulate_registration import simulate
 
 class Tests(unittest.TestCase):
@@ -71,7 +71,7 @@ class Tests(unittest.TestCase):
     def test_pose_jump_needs_full_reacquisition(self):
         tr=PlateTracker(self.cam,self.marker,reacquire_frames=3)
         a=self.fake_frame()
-        # Same orientation, camera shifted 0.6 m sideways: beyond max_step_m.
+        # Same orientation, camera shifted 0.6 m sideways: too fast for one 30 fps frame.
         b=self.fake_frame(self.rvec,self.T-self.R@np.array([.6,0,0]))
         for _ in range(3):tr.track(a)
         self.assertIsNotNone(tr.previous)
@@ -154,6 +154,30 @@ class Tests(unittest.TestCase):
         near=simulate(self.cam,self.BOARD,zone,(0.3,1.35,0.9),(0,.6,-.5),[1.0],trials=10)
         self.assertIn('error',near)
         self.assertFalse(near['markers'][0]['in_frame'])
+
+    def test_continuity_limits_are_per_second(self):
+        tr=PlateTracker(self.cam,self.marker,reacquire_frames=1)
+        a=self.fake_frame()
+        b=self.fake_frame(self.rvec,self.T-self.R@np.array([.6,0,0]))
+        # 0.6 m in 1/30 s (18 m/s) is a jump; the same move over 0.1 s (6 m/s) is not.
+        self.assertIsNotNone(tr.track(a,0.0))
+        self.assertIsNone(tr.track(b,1/30));self.assertEqual(tr.rejected,'pose-jump')
+        tr=PlateTracker(self.cam,self.marker,reacquire_frames=1)
+        self.assertIsNotNone(tr.track(a,0.0))
+        self.assertIsNotNone(tr.track(b,0.1))
+        # A repeated or backwards timestamp cannot vouch for continuity.
+        self.assertIsNone(tr.track(b,0.1));self.assertEqual(tr.rejected,'pose-jump')
+
+    def test_frame_clock_uses_container_time_and_counts_fallbacks(self):
+        class Cap:
+            def __init__(self,ms):self.ms=iter(ms)
+            def get(self,prop):return next(self.ms)
+        clock=FrameClock(Cap([0,40,160,160,float('nan'),240]),live=False,fps=25)
+        times=[clock() for _ in range(6)]
+        np.testing.assert_allclose(times,[0,.04,.16,.2,.24,.24+.04])
+        # 160 repeated, NaN, then 240 colliding with the 0.24 s guess: three fallbacks.
+        self.assertEqual(clock.fallbacks,3)
+        self.assertEqual(clock.source,'container')
 
     def test_resolution_mismatch_rejected(self):
         tracker=PlateTracker(self.cam,self.marker)

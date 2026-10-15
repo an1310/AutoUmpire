@@ -1,4 +1,4 @@
-import { projectTrackedZone, validTrackingRecord } from './replayProjection.js';
+import { frameAtTime, projectTrackedZone, validTrackingRecord } from './replayProjection.js';
 const video=document.querySelector('#video');
 const canvas=document.querySelector('#overlay');
 const ctx=canvas.getContext('2d');
@@ -20,7 +20,9 @@ document.querySelector('#trackFile').addEventListener('change',async e=>{
   try{
     const value=JSON.parse(await file.text());validateTracking(value);
     data=value;poses=new Map(data.poses.map(r=>[r.frame,r]));
-    status.textContent=`Loaded ${data.poses.length} accepted poses; ${data.frames_processed} total frames.`;
+    const timing=Array.isArray(data.frame_times_s)
+      ? `${data.timestamp_source} timestamps` : 'LEGACY fixed-fps timing (re-run tracker for exact timing)';
+    status.textContent=`Loaded ${data.poses.length} accepted poses; ${data.frames_processed} total frames; ${timing}.`;
   }catch(err){data=null;poses=new Map();status.textContent='Cannot load tracking JSON: '+err.message;}
 });
 function draw(_,meta){
@@ -29,7 +31,9 @@ function draw(_,meta){
   ctx.clearRect(0,0,canvas.width,canvas.height);
   if(data && W && H && data.camera.width===W && data.camera.height===H){
     const time=meta?.mediaTime??video.currentTime;
-    const frame=Math.round(time*data.fps);
+    // Older tracking files lack frame_times_s; frame*fps is wrong for variable-rate video.
+    const frame=Array.isArray(data.frame_times_s)
+      ? frameAtTime(data.frame_times_s,time) : Math.round(time*data.fps);
     const record=poses.get(frame);
     if(validTrackingRecord(record)){
       const segments=projectTrackedZone(record,data.camera);

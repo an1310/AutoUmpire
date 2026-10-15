@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import math
 import sys
+import time
 import cv2
 import numpy as np
 
@@ -43,12 +45,40 @@ def validate_config(config):
     return camera,markers,manual
 
 
+class FrameClock:
+    """Presentation time of each decoded frame, in seconds.
+
+    Files: the container timestamp (CAP_PROP_POS_MSEC). frame_index/fps is wrong
+    for variable-frame-rate video, which phones commonly record. Live cameras:
+    a monotonic wall clock. A missing or non-increasing container time falls back
+    to previous + 1/fps and is counted, so it is visible in the output.
+    """
+    def __init__(self,cap,live:bool,fps:float):
+        self.cap,self.live,self.fps=cap,live,fps
+        self.source='wallclock' if live else 'container'
+        self.previous=None;self.fallbacks=0;self.start=time.monotonic()
+
+    def __call__(self) -> float:
+        if self.live:
+            t=time.monotonic()-self.start
+        else:
+            t=self.cap.get(cv2.CAP_PROP_POS_MSEC)/1000
+            if not math.isfinite(t) or t<0 or (self.previous is not None and t<=self.previous):
+                self.fallbacks+=1
+                t=0.0 if self.previous is None else self.previous+1/self.fps
+        self.previous=t
+        return t
+
+
 def run(args):
     config=json.loads(Path(args.config).read_text())
     camera,markers,manual=validate_config(config)
     cap=cv2.VideoCapture(int(args.input) if args.input.isdigit() else args.input)
     if not cap.isOpened():raise RuntimeError(f'Cannot open camera/video: {args.input}')
     fps=cap.get(cv2.CAP_PROP_FPS) or 30.0
+    live=args.input.isdigit()
+    clock=FrameClock(cap,live,fps)
+    frame_times=[]
     writer=None; estimator=None
     poses=[]; diagnostics={}; lock=StanceLock()
     try:
@@ -68,20 +98,23 @@ def run(args):
             from autoumpire_cv.pose_model import BatterEstimator
             estimator=BatterEstimator(cfg['model_path'],float(cfg['height_m']),tuple(cfg['roi']))
         tracker=PlateTracker(camera,markers,min_markers=config.get('min_markers'))
-        frame_index=0;active=manual
+        frame_index=0;active=manual;last_ms=-1
         while True:
             ok,frame=cap.read()
             if not ok:break
             camera.validate_frame(frame)
+            timestamp_s=clock();frame_times.append(timestamp_s)
             if frame_index in args.reset_at:
                 lock.reset();active=manual
             if estimator is not None and lock.locked is None:
-                timestamp_ms=int(round(frame_index*1000/fps))
+                # MediaPipe VIDEO mode needs strictly increasing integer milliseconds.
+                timestamp_ms=max(int(round(timestamp_s*1000)),last_ms+1)
+                last_ms=timestamp_ms
                 suggestion=estimator.proposal(frame,timestamp_ms)
                 accepted=lock.update(suggestion)
                 if accepted is not None:
                     active=StrikeZone(accepted.bottom_m,accepted.top_m)
-            pose=tracker.track(frame)
+            pose=tracker.track(frame,timestamp_s)
             if pose is None and args.allow_plate_contour:
                 # Using a shape-based fallback can latch onto unrelated bright polygons.
                 # Require explicit opt-in and still apply physical/reprojection gates.
@@ -94,7 +127,7 @@ def run(args):
             diagnostics[status]=diagnostics.get(status,0)+1
             if pose is not None:
                 active.draw(frame,camera,pose)
-                poses.append({'frame':frame_index,'timestamp_s':frame_index/fps,
+                poses.append({'frame':frame_index,'timestamp_s':timestamp_s,
                               'world_to_camera':pose.world_to_camera.reshape(-1).tolist(),
                               'zone':{'bottom_m':active.bottom_m,'top_m':active.top_m},
                               'source':pose.method,'reprojection_px':pose.reprojection_px,
@@ -114,12 +147,17 @@ def run(args):
     result={'schema':'autoumpire-tracking-v1','source':args.input,
             'camera':{'width':camera.width,'height':camera.height,
                       'matrix':camera.matrix.tolist(),'distortion':camera.distortion.ravel().tolist()},
-            'markers':[vars(m) for m in markers],'min_markers':tracker.min_markers,'frames_processed':frame_index,'fps':fps,'poses':poses,
+            'markers':[vars(m) for m in markers],'min_markers':tracker.min_markers,'frames_processed':frame_index,'fps':fps,
+            # Every processed frame's time, so a viewer can map playback time to a
+            # frame (and know when that frame had no accepted pose).
+            'timestamp_source':clock.source,'timestamp_fallbacks':clock.fallbacks,
+            'frame_times_s':frame_times,'poses':poses,
             'diagnostics':diagnostics,
             'limitations':['No marker/plate -> no overlay; no predictive extrapolation',
                            'Monocular pose and image landmarks lack validated real-world overlay accuracy',
                            'Manual marker offset + known camera intrinsics required',
-                           'Video output has no audio track']}
+                           'Video output has no audio track',
+                           'Annotated video is written at a constant nominal fps; use frame_times_s for timing']}
     if args.output_json:Path(args.output_json).write_text(json.dumps(result,indent=2)+'\n')
     print(f"Processed {frame_index}; overlay {len(poses)} frames; hidden {frame_index-len(poses)}; reasons: {diagnostics}")
     return result
