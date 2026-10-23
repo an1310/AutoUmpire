@@ -81,10 +81,18 @@ class HdrInput(unittest.TestCase):
     def setUp(self):
         self.dir=tempfile.TemporaryDirectory()
         self.path=Path(self.dir.name)/'hlg.mp4'
-        # 10 frames tagged as HLG / BT.2020, like phone and glasses HDR video.
+        # 10 frames tagged as HLG / BT.2020, like phone and glasses HDR video. Tag the
+        # frames themselves (setparams): ffmpeg 8 no longer applies -color_trc alone
+        # to the stream, so the codec options are kept only as a fallback.
         subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc=size=64x48:rate=25','-frames:v','10',
+                        '-vf','setparams=color_trc=arib-std-b67:color_primaries=bt2020:colorspace=bt2020nc',
                         '-c:v','libx264','-pix_fmt','yuv420p','-color_trc','arib-std-b67',
                         '-color_primaries','bt2020','-colorspace','bt2020nc',str(self.path)],check=True)
+        transfer=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries',
+                                 'stream=color_transfer','-of','csv=p=0',str(self.path)],
+                                capture_output=True,text=True).stdout.strip()
+        if transfer!='arib-std-b67':   # a broken fixture, not a product failure
+            self.fail(f'generated clip is not tagged HLG (ffprobe color_transfer={transfer!r})')
 
     def tearDown(self):self.dir.cleanup()
 
