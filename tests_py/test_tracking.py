@@ -10,7 +10,8 @@ from autoumpire_cv.batter import StanceLock,Proposal,propose_from_landmarks
 from autoumpire_cv.plate import order_pentagon, detect_plate
 from autoumpire_cv.zone import PLATE_XZ
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
-from track_video import FrameClock,validate_config
+from autoumpire_cv.video import FrameClock
+from track_video import validate_config
 from simulate_registration import simulate
 
 class Tests(unittest.TestCase):

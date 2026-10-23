@@ -14,9 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-import math
 import sys
-import time
 import cv2
 import numpy as np
 
@@ -24,6 +22,7 @@ import numpy as np
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from autoumpire_cv.registration import Camera,MarkerLocation,PlateTracker
 from autoumpire_cv.plate import detect_plate
+from autoumpire_cv.video import open_video
 from autoumpire_cv.zone import StrikeZone
 from autoumpire_cv.batter import StanceLock
 
@@ -45,39 +44,13 @@ def validate_config(config):
     return camera,markers,manual
 
 
-class FrameClock:
-    """Presentation time of each decoded frame, in seconds.
-
-    Files: the container timestamp (CAP_PROP_POS_MSEC). frame_index/fps is wrong
-    for variable-frame-rate video, which phones commonly record. Live cameras:
-    a monotonic wall clock. A missing or non-increasing container time falls back
-    to previous + 1/fps and is counted, so it is visible in the output.
-    """
-    def __init__(self,cap,live:bool,fps:float):
-        self.cap,self.live,self.fps=cap,live,fps
-        self.source='wallclock' if live else 'container'
-        self.previous=None;self.fallbacks=0;self.start=time.monotonic()
-
-    def __call__(self) -> float:
-        if self.live:
-            t=time.monotonic()-self.start
-        else:
-            t=self.cap.get(cv2.CAP_PROP_POS_MSEC)/1000
-            if not math.isfinite(t) or t<0 or (self.previous is not None and t<=self.previous):
-                self.fallbacks+=1
-                t=0.0 if self.previous is None else self.previous+1/self.fps
-        self.previous=t
-        return t
-
-
 def run(args):
     config=json.loads(Path(args.config).read_text())
     camera,markers,manual=validate_config(config)
-    cap=cv2.VideoCapture(int(args.input) if args.input.isdigit() else args.input)
-    if not cap.isOpened():raise RuntimeError(f'Cannot open camera/video: {args.input}')
-    fps=cap.get(cv2.CAP_PROP_FPS) or 30.0
-    live=args.input.isdigit()
-    clock=FrameClock(cap,live,fps)
+    video=open_video(args.input,hdr=args.hdr)
+    fps=video.fps
+    if video.hdr:
+        print(f"{video.hdr} HDR input: {'tone-mapped to SDR' if video.tonemapped else 'decoded RAW (no tone map)'}",file=sys.stderr)
     frame_times=[]
     writer=None; estimator=None
     poses=[]; diagnostics={}; lock=StanceLock()
@@ -100,10 +73,10 @@ def run(args):
         tracker=PlateTracker(camera,markers,min_markers=config.get('min_markers'))
         frame_index=0;active=manual;last_ms=-1
         while True:
-            ok,frame=cap.read()
+            ok,frame,timestamp_s=video.read()
             if not ok:break
             camera.validate_frame(frame)
-            timestamp_s=clock();frame_times.append(timestamp_s)
+            frame_times.append(timestamp_s)
             if frame_index in args.reset_at:
                 lock.reset();active=manual
             if estimator is not None and lock.locked is None:
@@ -114,15 +87,16 @@ def run(args):
                 accepted=lock.update(suggestion)
                 if accepted is not None:
                     active=StrikeZone(accepted.bottom_m,accepted.top_m)
-            pose=tracker.track(frame,timestamp_s)
-            if pose is None and args.allow_plate_contour:
-                # Using a shape-based fallback can latch onto unrelated bright polygons.
-                # Require explicit opt-in and still apply physical/reprojection gates.
-                pose=detect_plate(frame,camera)
-                if pose is not None and tracker.previous is not None:
-                    # Tracker's continuity gate only applies between ArUco frames.
-                    # Do not switch estimator sources without manual validation.
-                    pose=None
+            est=tracker.measure(frame,timestamp_s)
+            if est is None and args.allow_plate_contour:
+                # Shape fallback can latch onto other bright polygons, so it is opt-in
+                # and its poses pass the SAME continuity gate as markers: a source
+                # switch is accepted only if it agrees with the last accepted pose.
+                reason=tracker.rejected
+                est=detect_plate(frame,camera)
+                if est is not None:est.timestamp_s=timestamp_s
+                else:tracker.rejected=reason
+            pose=tracker.accept(est)
             status=(tracker.rejected or 'no-pose') if pose is None else pose.method
             diagnostics[status]=diagnostics.get(status,0)+1
             if pose is not None:
@@ -141,7 +115,7 @@ def run(args):
             frame_index+=1
             if args.max_frames and frame_index>=args.max_frames:break
     finally:
-        cap.release()
+        video.release()
         if writer is not None:writer.release()
         if estimator is not None:estimator.close()
     result={'schema':'autoumpire-tracking-v1','source':args.input,
@@ -150,7 +124,8 @@ def run(args):
             'markers':[vars(m) for m in markers],'min_markers':tracker.min_markers,'frames_processed':frame_index,'fps':fps,
             # Every processed frame's time, so a viewer can map playback time to a
             # frame (and know when that frame had no accepted pose).
-            'timestamp_source':clock.source,'timestamp_fallbacks':clock.fallbacks,
+            'timestamp_source':video.timestamp_source,'timestamp_fallbacks':video.timestamp_fallbacks,
+            'hdr':video.hdr,'tonemapped':video.tonemapped,
             'frame_times_s':frame_times,'poses':poses,
             'diagnostics':diagnostics,
             'limitations':['No marker/plate -> no overlay; no predictive extrapolation',
@@ -172,7 +147,9 @@ def main():
     p.add_argument('--max-frames',type=int,default=0)
     p.add_argument('--reset-at',type=int,nargs='*',default=[],help='Frames starting new batter/plate appearance')
     p.add_argument('--auto-zone',action='store_true',help='Opt in to MediaPipe proposal after stance stability gate')
-    p.add_argument('--allow-plate-contour',action='store_true',help='Unvalidated white plate detection when marker absent')
+    p.add_argument('--allow-plate-contour',action='store_true',help='Unvalidated plate-outline detection when markers are absent')
+    p.add_argument('--hdr',choices=['tonemap','raw'],default='tonemap',
+                   help='HDR (HLG/PQ) input: tone-map via ffmpeg (default) or decode raw for comparison')
     args=p.parse_args()
     if not(args.output_video or args.output_json):p.error('At least one output required')
     run(args)

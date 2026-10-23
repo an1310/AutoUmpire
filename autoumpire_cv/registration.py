@@ -193,13 +193,32 @@ class PlateTracker:
         self.candidates=[] if seed is None else [seed]
         return None
 
-    def track(self,frame,timestamp_s:Optional[float]=None) -> Optional[Estimate]:
-        """``timestamp_s`` is the frame's presentation time; omit only for fixed-rate input."""
+    def miss(self,reason:str):
+        """No usable measurement this frame; the gate decides what that means."""
+        self.rejected=reason
+        return None
+
+    def measure(self,frame,timestamp_s:Optional[float]=None) -> Optional[Estimate]:
+        """Marker pose for one frame, before any continuity gating.
+
+        On failure returns None with the reason in ``rejected``. Pass the result,
+        or a pose from another source, to ``accept``.
+        """
         self.camera.validate_frame(frame)
         est=self.fit_markers(*self.detector.detectMarkers(frame)[:2])
+        if est is not None:
+            est.timestamp_s=timestamp_s
+        return est
+
+    def accept(self,est:Optional[Estimate]) -> Optional[Estimate]:
+        """Continuity gate shared by every pose source (markers, plate contour).
+
+        A pose is shown only if it continues the previous accepted pose, or after
+        ``reacquire_frames`` consecutive consistent poses. Switching sources is
+        therefore allowed only when the new source agrees with the old one.
+        """
         if est is None:
-            return None
-        est.timestamp_s=timestamp_s
+            return self.lose(self.rejected or 'no-observation')
         if self.previous is not None:
             if not self.consistent(est,self.previous):
                 # The new pose must earn acceptance like any other (re)acquisition.
@@ -215,6 +234,10 @@ class PlateTracker:
             self.rejected='acquiring';return None
         self.candidates=[];self.previous=est;self.rejected=None
         return est
+
+    def track(self,frame,timestamp_s:Optional[float]=None) -> Optional[Estimate]:
+        """``timestamp_s`` is the frame's presentation time; omit only for fixed-rate input."""
+        return self.accept(self.measure(frame,timestamp_s))
 
     def residuals(self,est:Estimate,ids,observed) -> dict:
         obj=np.vstack([self.points[i] for i in ids])
@@ -254,13 +277,13 @@ class PlateTracker:
             # A repeated id (e.g. a second printed copy) cannot be assigned safely.
             if i in self.points and seen.count(i)==1:observed[i]=c.reshape(-1,2).astype(np.float64)
         if not observed:
-            return self.lose('marker-not-visible')
+            return self.miss('marker-not-visible')
         usable=[i for i in sorted(observed) if marker_side_px(observed[i])>=self.min_marker_side_px]
         if len(usable)<self.min_markers:
-            return self.lose('insufficient-observation')
+            return self.miss('insufficient-observation')
         used=self.consensus(usable,observed)
         if not used:
-            return self.lose('markers-inconsistent' if self.min_markers>1 else 'insufficient-observation')
+            return self.miss('markers-inconsistent' if self.min_markers>1 else 'insufficient-observation')
         est=self.fit_subset(used,observed)
         est.marker_pixels=min(marker_side_px(observed[i]) for i in used)
         est.markers_used=tuple(used)
