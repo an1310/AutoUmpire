@@ -1,0 +1,4 @@
+# Experiment only; not needed by the prototype. Results: Python 3.13, pycolmap 4.2.1, OpenCV 4.14.0, NumPy 2.5.4.
+pycolmap==4.2.1
+opencv-contrib-python>=4.10,<5   # same package as requirements-cv.txt; mixing the two breaks cv2
+numpy>=1.26,<3

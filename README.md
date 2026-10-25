@@ -48,6 +48,7 @@ Recorded video goes through the calibrated tracker (`tools/track_video.py`, see 
 | `tests/` | Unit tests for dimensions, geometry, error cases and projection |
 | `docs/strike-zone-preview.svg` | Concept image showing two batter heights |
 | `docs/architecture.md` | Calibration contract, validation and next milestones |
+| `experiments/field_map/` | Offline experiment: markerless field map so the zone holds while the catcher hides the plate ([results](docs/experiments/field-map-umpire-pov.md)) |
 
 **Roadmap:** automated plate detection and precise pose calibration → batter landmark detection and stance lock → confidence/fail-closed tracking → real headset validation → GoPro pose-estimation adapter.
 
