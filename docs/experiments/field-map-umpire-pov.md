@@ -35,7 +35,7 @@ Code: [`experiments/field_map/`](../../experiments/field_map/README.md). Footage
 | Measure | Value |
 |---|---|
 | Keyframes registered | 120 / 120, 31,310 map points, mean reprojection 0.45 px |
-| Self-calibrated lens | f = 651.3 px, k1 = 0.054, k2 = 0.006 |
+| Self-calibrated lens | f = 651.3 px, k1 = 0.054, k2 = 0.006 (a re-run gave 639.1 px; see [Run-to-run](#run-to-run-reproducibility)) |
 | Ground plane | 59 % of map points within 0.05 map units |
 | Plate centre, spread across the 4 annotated frames | 0.7–3.8 cm from the mean |
 | Plate corners, spread across frames | rms 4.5 cm, max 9.7 cm |
@@ -70,6 +70,30 @@ So frame-to-frame pose noise is below about 0.05°: the measured slip matches th
 
 - **Slip cannot see a constant error.** If the whole map or the plate anchor is off, every frame is off the same way and slip stays at zero. Slip measures smoothness, not accuracy.
 - **A first version of the metric was wrong twice.** A 5-frame-median "jitter" scored 0.0 px by construction, because a median filter returns monotonic motion unchanged. Its replacement, a ring 0.3–1.2 m around the plate, reported 5–15 px "slip" that was really the catcher. From the umpire's eye the catcher covers most of that ring, so the flow followed the catcher.
+
+### Run-to-run reproducibility
+
+The whole pipeline was re-run from scratch with the README commands (15.6 min end to end on 4 CPU cores). COLMAP's incremental mapping is not deterministic, so the two maps differ slightly:
+
+| Measure | Reported run | Re-run |
+|---|---|---|
+| Map | 31,310 points, 0.45 px reprojection | 31,369 points, 0.37 px |
+| Self-calibrated focal length | 651.3 px | 639.1 px |
+| Metres per map unit | 0.5617 | 0.5626 |
+| Corner spread / regulation-fit residuals | rms 4.5 cm / 2.0–4.4 cm | rms 4.5 cm / 2.0–4.5 cm |
+| Frames with a pose | 1,797 | 1,797 |
+| Zone shown | 1,665 (92.7 %) | 1,640 (91.3 %) |
+| Hidden: weak map support | 101 | 125 |
+| Slip median / p95 | 0.10 / 0.29 px | 0.10 / 0.28 px |
+
+**Where the zone lands, map against map.** The zone-corner disagreement was measured for each frame, taking the worst visible corner, with zone corners projected from each run's pose and anchor:
+
+- **Frames that pass both runs' gates** (1,103 frames): median 1.5 px, p95 6.1 px, max 7.0 px. That is roughly a third of a baseball's width at 2 m (inferred: about 24 px per ball at f ≈ 650 px).
+- **Disagreement over 20 px:** every case falls in the 14–15 s look-down, the stretch the weak-map-support gate hides. There the two maps differ by about 60 px.
+
+That gives independent support for the gate, whose threshold was chosen on that same stretch by eye. It is still one clip.
+
+This measures repeatability, not accuracy: two runs can agree and both be wrong.
 
 ### Occlusion
 

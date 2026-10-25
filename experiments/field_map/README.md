@@ -18,7 +18,7 @@ pip install -r experiments/field_map/requirements.txt   # pycolmap is pinned; it
 ```bash
 V=seg1.mp4; W=../runs/seg1; F=experiments/field_map
 
-# 1. Map: keyframes, mask the burned-in scoreboard, structure-from-motion (~minutes on CPU)
+# 1. Map: keyframes, mask the burned-in scoreboard, structure-from-motion (~8 min on 4 cores; the map varies slightly run to run)
 python $F/build_map.py --video $V --work $W --fps 4 --mask-box 0 0 475 62 --camera-params 580,640,360,0,0
 
 # 2. Anchor the plate. Corner pixels are hand-marked in keyframes ($W/images/f*.jpg),
