@@ -6,10 +6,11 @@ Coordinate system: **meters**, origin at the center of home plate's 17-inch boun
 
 The rendering code consumes pure `makeZone()` geometry. Camera input is a **different concern**:
 - **Desktop**: Three.js orbit camera, for inspecting shape and calibration.
-- **WebXR experimental**: use XR hit-test to manually place plate center on a detected plane; adjust plate yaw. Requires supported browser/device + HTTPS. Single hit test cannot identify a plate or prove 6DoF registration accuracy.
+- **WebXR experimental**: use two hit-test taps, at the plate's back tip and front-edge midpoint, to set position and heading. A span check rejects inconsistent placement. Requires supported browser/device + HTTPS; the taps do not identify the plate or prove registration accuracy.
 - **GoPro/offline**: `tools/track_video.py` estimates per-frame camera poses from measured markers; `review.html` replays them with full lens distortion (`src/replayProjection.js`), matched to video by per-frame timestamps.
+- **Experimental field map**: `experiments/field_map/localize.py` estimates independent query poses against all mapped landmarks using COLMAP features. `render_overlay.py` projects the zone with the map's camera model and applies confidence and continuity gates. Its pose JSON and camera models are separate from the browser replay format. See the [current checkpoint](experiments/field-map-relocalization.md).
 
-Future adapter boundary: each input source should produce a calibrated camera/plate pose with timestamp + covariance/confidence, without modifying geometry. Offline pose estimation may use fiducials, homography for the ground plane, PnP, or SLAM—but those are **not implemented**. A plane-only homography will not correctly position a 3D elevated strike-zone volume.
+Adapter boundary: each input source should produce a calibrated camera/plate pose with timing and confidence, without modifying geometry. Fiducial PnP and experimental sparse-map localization are implemented; real-device tracking fusion, calibrated uncertainty, and live SLAM integration are not. A plane-only homography will not correctly position a 3D elevated strike-zone volume.
 
 ## Smart-glasses device classes
 

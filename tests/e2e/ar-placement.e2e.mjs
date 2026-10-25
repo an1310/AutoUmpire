@@ -39,6 +39,7 @@ async function startAr() {
   await page.waitForFunction(() => /START AR/i.test(document.querySelector('#ar-button-container button')?.textContent || ''));
   await button.click();
   await page.waitForFunction(() => /BACK TIP/.test(document.querySelector('#status').textContent));
+  await page.waitForFunction(() => window.__xr.activeSession?.inputSources.length > 0);
   return { page, errors };
 }
 const status = page => page.textContent('#status');
