@@ -84,7 +84,7 @@ An additional-reference experiment increased inlier counts but reconstructed cam
 
 ## Verification and practical limits
 
-Local verification passes 47 tests: 24 existing Python tests, eight synthetic field-map regressions, 13 JavaScript unit tests, and two emulated AR tests. The production build and whitespace checks pass. The new field-map suite is configured in CI; remote CI was not run for this local checkpoint.
+Local verification passes 47 tests: 24 existing Python tests, eight synthetic field-map regressions, 13 JavaScript unit tests, and two emulated AR tests. The production build and whitespace checks pass. GitHub Actions also passes the `verify`, `cv-tests`, `field-map-tests`, and `ar-emulation` jobs for the checkpoint. See [PR #9's checks](https://github.com/an1310/AutoUmpire/pull/9/checks) for remote verification of subsequent revisions.
 
 The synthetic tests cover independent queries without reference images or timing, repeated landmark observations, descriptor ambiguity, unique correspondences, unrelated and blank imagery, read-only databases, incompatible observation rows, and fresh per-query output. The AR test setup now waits for the emulated controller before driving it.
 
