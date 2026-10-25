@@ -1,127 +1,235 @@
 #!/usr/bin/env python3
-"""Step 3: localize every video frame against the field map.
+"""Localize an independent video against a fixed COLMAP field map.
 
-For each frame: SIFT features, ratio-test matches to the features of the 4
-temporally nearest keyframes that have 3D map points, then LO-RANSAC absolute
-pose with the map's (fisheye) camera. Frames are never assumed continuous, so
-edit cuts and whip pans do not propagate errors; continuity is judged later.
+Uses original map SIFT descriptors and the same COLMAP extractor for queries.
+OpenCV FLANN searches all mapped landmarks, independent of timestamps.
+Ratio-test competitors must be different 3D landmarks, not repeated views of
+the same point. Display gates remain in render_overlay.py.
 
-  python experiments/field_map/localize.py --work runs/seg1 --video seg1.mp4
+  python experiments/field_map/localize.py --work runs/map --video query.mp4 \
+      --output-dir runs/query
 
-Keyframes are paired to video frames by image correlation, not by index/fps:
-on the test clip ffmpeg's fps sampling ran ~0.1 s (6-7 frames) ahead of
-OpenCV's frame numbering. Writes localized.json: per frame pose, matches, inliers.
+Query resolution must match the map. Writes localized.json (unchanged pose
+schema) and localization_info.json. Reference images/frame pairing are not needed.
 """
 from __future__ import annotations
 import argparse
+from contextlib import closing
 import json
-import time
 from multiprocessing import Pool
 from pathlib import Path
+import time
+import sqlite3
 import cv2
 import numpy as np
 import pycolmap
 
-G={}   # per-process state
+G = {}  # Per-worker extractor, index and pose-estimation options.
+DESCRIPTOR_RATIO = .9
 
 
-def small_gray(img):
-    return cv2.resize(cv2.cvtColor(img,cv2.COLOR_BGR2GRAY),(160,90)).astype(np.float32)
+class MapIndex:
+    """Map-wide search with one correspondence per 3D landmark."""
+
+    def __init__(self, descriptors, point_ids, xyz, tracks):
+        self.descriptors = np.ascontiguousarray(descriptors, dtype=np.float32)
+        self.point_ids = np.asarray(point_ids)
+        self.xyz = np.asarray(xyz, dtype=np.float64)
+        self.tracks = np.asarray(tracks)
+        self.distinct_points = len(np.unique(self.point_ids))
+        self.matcher = cv2.FlannBasedMatcher(dict(algorithm=1, trees=4), dict(checks=128))
+        if len(self.descriptors):
+            self.matcher.add([self.descriptors])
+            self.matcher.train()
+
+    def correspondences(self, xy, descriptors):
+        """Return query pixels, world points and track lengths for unique matches."""
+        empty = (np.empty((0, 2)), np.empty((0, 3)), np.empty(0))
+        if descriptors is None or not len(descriptors) or self.distinct_points < 2:
+            return empty
+        query = np.ascontiguousarray(descriptors, dtype=np.float32)
+        pending = np.arange(len(query))
+        count = min(32, len(self.descriptors))
+        best = {}
+        while len(pending):
+            retry = []
+            for query_idx, matches in zip(pending, self.matcher.knnMatch(query[pending], k=count)):
+                first = matches[0]
+                point_id = self.point_ids[first.trainIdx]
+                other = next((m for m in matches[1:]
+                              if self.point_ids[m.trainIdx] != point_id), None)
+                if other is None:
+                    # Long tracks can fill a neighbor list with ONE landmark.
+                    # Expand only affected queries until a real rival is found.
+                    if count < len(self.descriptors):
+                        retry.append(query_idx)
+                    continue
+                if first.distance >= DESCRIPTOR_RATIO * other.distance:
+                    continue
+                if point_id not in best or first.distance < best[point_id][0]:
+                    best[point_id] = (first.distance, query_idx, first.trainIdx)
+            pending = np.asarray(retry, dtype=int)
+            count = min(count * 4, len(self.descriptors))
+        if not best:
+            return empty
+        query_rows = [m[1] for m in best.values()]
+        map_rows = [m[2] for m in best.values()]
+        return np.asarray(xy)[query_rows], self.xyz[map_rows], self.tracks[map_rows]
 
 
-def ncc(a,b):
-    a=(a-a.mean())/(a.std()+1e-6);b=(b-b.mean())/(b.std()+1e-6);return float((a*b).mean())
+def load_map(work):
+    """Read exact database observation indices, without pixel reassociation."""
+    database = work/'database.db'
+    if not database.is_file():
+        raise ValueError(f'Map feature database is missing: {database}')
+    rec = pycolmap.Reconstruction(str(work/'sparse'/'0'))
+    if len(rec.cameras) != 1:
+        raise ValueError('Expected a field map with exactly one camera')
+    camera = next(iter(rec.cameras.values()))
+    descriptors, ids, xyz, tracks = [], [], [], []
+    # COLMAP's opener initializes SQLite schema and takes write locks even for
+    # readers. Stdlib SQLite read-only mode supports immutable/shared maps.
+    with closing(sqlite3.connect(database.resolve().as_uri()+'?mode=ro', uri=True)) as db:
+        for image in sorted(rec.images.values(), key=lambda im: im.name):
+            source = db.execute('SELECT name FROM images WHERE image_id=?', (image.image_id,)).fetchone()
+            if source is None or source[0] != image.name:
+                raise ValueError('Feature database does not belong to this reconstruction')
+            observations = [(i, p.point3D_id) for i, p in enumerate(image.points2D)
+                            if p.has_point3D()]
+            if not observations:
+                continue
+            rows, point_ids = zip(*observations)
+            # Native queries and database descriptors share COLMAP's quantized
+            # RootSIFT representation, including its scale and observation rows.
+            descriptor = db.execute('SELECT type, rows, cols, data FROM descriptors WHERE image_id=?',
+                                    (image.image_id,)).fetchone()
+            if (descriptor is None or descriptor[0] != pycolmap.FeatureExtractorType.SIFT.value
+                    or descriptor[1:3] != (len(image.points2D), 128)
+                    or descriptor[3] is None or len(descriptor[3]) != descriptor[1]*128):
+                raise ValueError(f'{image.name}: missing or incompatible SIFT descriptors')
+            data = np.frombuffer(descriptor[3], dtype=np.uint8).reshape(descriptor[1], 128)
+            keypoint = db.execute('SELECT rows, cols, data FROM keypoints WHERE image_id=?',
+                                  (image.image_id,)).fetchone()
+            if (keypoint is None or keypoint[0] != len(image.points2D) or keypoint[1] < 2
+                    or keypoint[2] is None or len(keypoint[2]) != keypoint[0]*keypoint[1]*4):
+                raise ValueError(f'{image.name}: missing database observation rows')
+            keypoints = np.frombuffer(keypoint[2], dtype=np.float32).reshape(keypoint[0], keypoint[1])
+            expected = np.array([p.xy for p in image.points2D])
+            if keypoints.shape[0] != len(expected) or not np.allclose(keypoints[:, :2], expected, rtol=0, atol=1e-3):
+                raise ValueError(f'{image.name}: database observation rows differ from the reconstruction')
+            descriptors.append(data[list(rows)].astype(np.float32))
+            ids.extend(point_ids)
+            xyz.extend(rec.points3D[p].xyz for p in point_ids)
+            tracks.extend(rec.points3D[p].track.length() for p in point_ids)
+    if len(set(ids)) < 12:
+        raise ValueError('Map needs at least 12 distinct landmarks with SIFT descriptors')
+    return camera, np.vstack(descriptors), np.asarray(ids), np.asarray(xyz), np.asarray(tracks)
 
 
-def keyframe_video_index(work:Path,video:Path,fps_kf:float):
-    cap=cv2.VideoCapture(str(video));fps=cap.get(cv2.CAP_PROP_FPS);thumbs=[]
-    while True:
-        ok,f=cap.read()
-        if not ok:break
-        thumbs.append(small_gray(f))
-    out={}
-    for path in sorted((work/'images').glob('f*.jpg')):
-        i=int(path.stem[1:]);k=small_gray(cv2.imread(str(path)));guess=int(round((i-1)*fps/fps_kf))
-        cand=range(max(0,guess-15),min(len(thumbs),guess+16))
-        scores=[ncc(k,thumbs[j]) for j in cand];best=int(np.argmax(scores))
-        if scores[best]<0.95:raise SystemExit(f'{path.name}: no video frame matches (best correlation {scores[best]:.3f})')
-        out[path.name]=list(cand)[best]
-    return out,len(thumbs)
-
-
-def build_keyframes(work:Path,mask,k2v):
-    rec=pycolmap.Reconstruction(str(work/'sparse'/'0'));sift=cv2.SIFT_create(nfeatures=4096);kf=[]
-    for im in rec.images.values():
-        obs=[(p.xy,p.point3D_id) for p in im.points2D if p.has_point3D()]
-        xy=(np.array([o[0] for o in obs])-0.5).astype(np.float32)   # COLMAP pixel centres are +0.5
-        ids=np.array([o[1] for o in obs])
-        kps,des=sift.detectAndCompute(cv2.cvtColor(cv2.imread(str(work/'images'/im.name)),cv2.COLOR_BGR2GRAY),mask)
-        pts=np.array([k.pt for k in kps],np.float32)
-        d2=((pts[:,None,:]-xy[None,:,:])**2).sum(-1);j=d2.argmin(1);ok=d2[np.arange(len(pts)),j]<4.0
-        sel=ids[j[ok]]
-        kf.append((k2v[im.name],des[ok],np.array([rec.points3D[i].xyz for i in sel]),sel,
-                   np.array([rec.points3D[i].track.length() for i in sel])))
-    kf.sort(key=lambda x:x[0])
-    return next(iter(rec.cameras.values())),kf
-
-
-def init(work,mask,k2v,max_error):
-    G['camera'],G['kf']=build_keyframes(work,mask,k2v)
-    G['times']=np.array([k[0] for k in G['kf']]);G['mask']=mask;G['max_error']=max_error
-    G['sift']=cv2.SIFT_create(nfeatures=4096);G['bf']=cv2.BFMatcher(cv2.NORM_L2)
+def init(camera, descriptors, ids, xyz, tracks, mask, max_error, max_features):
+    cv2.setNumThreads(1)
+    options = pycolmap.FeatureExtractionOptions()
+    options.num_threads = 1
+    options.sift.max_num_features = max_features
+    G['extractor'] = pycolmap.FeatureExtractor.create(options, device=pycolmap.Device.cpu)
+    G['index'] = MapIndex(descriptors, ids, xyz, tracks)
+    G['camera'], G['mask'] = camera, mask
+    G['pose_options'] = pycolmap.AbsolutePoseEstimationOptions()
+    G['pose_options'].ransac.max_error = max_error
 
 
 def localize(item):
-    idx,frame=item
-    kps,des=G['sift'].detectAndCompute(cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY),G['mask'])
-    if des is None or len(kps)<20:return idx,None,0,0,0
-    near=np.argsort(np.abs(G['times']-idx))[:4];kf=G['kf']
-    D=np.vstack([kf[k][1] for k in near]);X=np.vstack([kf[k][2] for k in near])
-    I=np.concatenate([kf[k][3] for k in near]);T=np.concatenate([kf[k][4] for k in near])
-    best={}
-    for m in G['bf'].knnMatch(des,D,k=2):
-        if len(m)<2 or m[0].distance>0.8*m[1].distance:continue
-        pid=I[m[0].trainIdx]
-        if pid not in best or m[0].distance<best[pid][0]:best[pid]=(m[0].distance,m[0].queryIdx,m[0].trainIdx)
-    if len(best)<12:return idx,None,len(best),0,0
-    p2=np.array([kps[v[1]].pt for v in best.values()],np.float64)+0.5
-    p3=np.array([X[v[2]] for v in best.values()])
-    opts=pycolmap.AbsolutePoseEstimationOptions();opts.ransac.max_error=G['max_error']
-    res=pycolmap.estimate_and_refine_absolute_pose(p2,p3,G['camera'],opts)
-    if res is None:return idx,None,len(best),0,0
-    pose=res['cam_from_world'];inl=np.asarray(res['inlier_mask'],bool)
-    # How many keyframes saw the supporting map points: short tracks = weakly constrained map region.
-    track=float(np.median(np.array([T[v[2]] for v in best.values()])[inl])) if inl.any() else 0.0
-    return idx,(pose.rotation.matrix().tolist(),pose.translation.tolist()),len(best),int(res['num_inliers']),track
+    idx, frame = item
+    camera = G['camera']
+    if frame.shape[:2] != (camera.height, camera.width):
+        raise ValueError('Query frame resolution must match the map camera')
+    bitmap = pycolmap.Bitmap.from_array(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    keypoints, descriptors = G['extractor'].extract(bitmap)
+    if not keypoints:
+        return idx, None, 0, 0, 0
+    xy = np.array([[p.x, p.y] for p in keypoints])
+    # COLMAP features already use half-pixel centers. Only mask lookup needs
+    # integer indices; the pose solver receives native xy unchanged.
+    pixels = np.floor(xy).astype(int)
+    keep = ((pixels[:, 0] >= 0) & (pixels[:, 0] < camera.width)
+            & (pixels[:, 1] >= 0) & (pixels[:, 1] < camera.height))
+    keep[keep] &= G['mask'][pixels[keep, 1], pixels[keep, 0]] > 0
+    p2, p3, tracks = G['index'].correspondences(xy[keep], descriptors.data[keep])
+    if len(p2) < 12:
+        return idx, None, len(p2), 0, 0
+    result = pycolmap.estimate_and_refine_absolute_pose(p2, p3, camera, G['pose_options'])
+    if result is None:
+        return idx, None, len(p2), 0, 0
+    pose = result['cam_from_world']
+    inliers = np.asarray(result['inlier_mask'], dtype=bool)
+    track = float(np.median(tracks[inliers])) if inliers.any() else 0.
+    return idx, (pose.rotation.matrix().tolist(), pose.translation.tolist()), len(p2), int(result['num_inliers']), track
 
 
 def frames(video):
-    cap=cv2.VideoCapture(str(video));i=0
-    while True:
-        ok,f=cap.read()
-        if not ok:return
-        yield i,f;i+=1
+    cap = cv2.VideoCapture(str(video))
+    try:
+        if not cap.isOpened():
+            raise ValueError(f'Cannot open query video: {video}')
+        idx = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            yield idx, frame
+            idx += 1
+    finally:
+        cap.release()
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--work',type=Path,required=True)
-    p.add_argument('--video',type=Path,required=True)
-    p.add_argument('--keyframe-fps',type=float,default=4.0)
-    p.add_argument('--max-error',type=float,default=4.0,help='RANSAC inlier threshold, px')
-    p.add_argument('--workers',type=int,default=4)
-    a=p.parse_args()
-    mask=cv2.imread(str(a.work/'mask.png'),cv2.IMREAD_GRAYSCALE)
-    k2v,total=keyframe_video_index(a.work,a.video,a.keyframe_fps)
-    (a.work/'keyframe_to_video.json').write_text(json.dumps(k2v,indent=0))
-    t=time.time();out={}
-    with Pool(a.workers,initializer=init,initargs=(a.work,mask,k2v,a.max_error)) as pool:
-        for idx,pose,matches,inliers,track in pool.imap(localize,frames(a.video),chunksize=8):
-            out[idx]={'pose':pose,'matches':matches,'inliers':inliers,'median_track':track}
-            if idx%300==0:print(f'frame {idx}/{total}: {inliers} inliers ({time.time()-t:.0f}s)',flush=True)
-    (a.work/'localized.json').write_text(json.dumps(out))
-    print(f'localized {sum(v["pose"] is not None for v in out.values())}/{len(out)} frames in {time.time()-t:.0f}s')
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--work', type=Path, required=True, help='reference map directory')
+    parser.add_argument('--video', type=Path, required=True, help='independent query video')
+    parser.add_argument('--output-dir', type=Path, help='query results (default: --work)')
+    parser.add_argument('--max-error', type=float, default=4., help='RANSAC threshold, pixels')
+    parser.add_argument('--max-features', type=int, default=8192)
+    parser.add_argument('--workers', type=int, default=4)
+    args = parser.parse_args()
+    if args.workers < 1 or args.max_features < 12 or not np.isfinite(args.max_error) or args.max_error <= 0:
+        parser.error('workers must be positive, max-features >= 12, max-error finite and positive')
+    # Validate in the parent so a malformed map cannot cause worker respawns.
+    map_data = load_map(args.work)
+    camera = map_data[0]
+    mask = cv2.imread(str(args.work/'mask.png'), cv2.IMREAD_GRAYSCALE)
+    if mask is None or mask.shape != (camera.height, camera.width):
+        parser.error('Map mask is missing or does not match the map camera')
+    cap = cv2.VideoCapture(str(args.video))
+    try:
+        if not cap.isOpened():
+            parser.error(f'Cannot open query video: {args.video}')
+        size = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total, fps = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), cap.get(cv2.CAP_PROP_FPS)
+    finally:
+        cap.release()
+    if size != (camera.width, camera.height):
+        parser.error(f'Query is {size[0]}x{size[1]}; resize to map resolution {camera.width}x{camera.height} without cropping')
+    output = args.output_dir or args.work
+    output.mkdir(parents=True, exist_ok=True)
+    started, records = time.monotonic(), {}
+    with Pool(args.workers, initializer=init,
+              initargs=(*map_data, mask, args.max_error, args.max_features)) as pool:
+        for idx, pose, matches, inliers, track in pool.imap(localize, frames(args.video), chunksize=8):
+            records[idx] = {'pose': pose, 'matches': matches, 'inliers': inliers, 'median_track': track}
+            if idx % 300 == 0:
+                print(f'frame {idx}/{total}: {inliers} inliers ({time.monotonic()-started:.0f}s)', flush=True)
+        pool.close()
+        pool.join()
+    (output/'localized.json').write_text(json.dumps(records))
+    info = {'reference_map': str(args.work.resolve()), 'query_video': str(args.video.resolve()),
+            'method': 'COLMAP RootSIFT; map-wide FLANN; distinct-landmark ratio test',
+            'width': camera.width, 'height': camera.height, 'fps': fps,
+            'frames': len(records), 'max_features': args.max_features,
+            'descriptor_ratio': DESCRIPTOR_RATIO,
+            'max_error_px': args.max_error, 'seconds': time.monotonic()-started}
+    (output/'localization_info.json').write_text(json.dumps(info, indent=2)+'\n')
+    print(f'localized {sum(v["pose"] is not None for v in records.values())}/{len(records)} frames in {info["seconds"]:.0f}s')
 
 
-if __name__=='__main__':
+if __name__ == '__main__':
     main()

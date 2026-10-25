@@ -2,6 +2,8 @@
 
 **Status:** feasibility result on one clip. Not validated for officiating, not real-time, and the map was built from the same clip it localizes (see [Limits](#limits)).
 
+The measurements below describe the original timestamp-based localizer. The current implementation uses map-wide RootSIFT matching and accepts an independent query video; see the [current runbook](../../experiments/field_map/README.md#localize-a-separate-recording). Those changes do not retroactively validate these measurements on other footage.
+
 **Question:** can a head-worn camera find home plate when the plate is hidden behind the catcher, using no markers? The approach: build a 3D map of the field once, anchor home plate in that map, then localize each frame against the map. The overlay then follows the field (dirt texture, fences, trees, lines), not the plate, so it survives the catcher, the batter and the umpire's own crouch covering the plate.
 
 Code: [`experiments/field_map/`](../../experiments/field_map/README.md). Footage is not in the repo (it shows minors and identifiable people).

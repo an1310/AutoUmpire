@@ -59,3 +59,17 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: AR placement under emulation
         run: npm run test:ar
+
+  field-map-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install field-map dependencies
+        run: pip install -r experiments/field_map/requirements.txt
+      - name: Independent-query localization and rendering regressions
+        run: python -W error::ResourceWarning -m unittest discover -s experiments/field_map/tests -v

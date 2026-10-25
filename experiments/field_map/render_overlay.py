@@ -9,7 +9,8 @@ whip pan) it must be re-acquired over consecutive consistent frames.
   python experiments/field_map/render_overlay.py --work runs/seg1 --video seg1.mp4 \
       --output overlay.mp4 --zone 0.40 0.80
 
-Writes the video (no audio), overlay_stats.json and slip.json. Zone heights are
+Use --localizations runs/query/localized.json for an independent query video.
+Writes the video (no audio), overlay_stats.json and slip.json beside --output. Zone heights are
 inputs, not measurements of the batter.
 
 Slip: between consecutive shown frames, ground points in front of the plate are
@@ -95,12 +96,15 @@ def main():
     p.add_argument('--work',type=Path,required=True)
     p.add_argument('--video',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--localizations',type=Path,help='query poses (default: --work/localized.json)')
     p.add_argument('--zone',type=float,nargs=2,default=[0.40,0.80],metavar=('BOTTOM_M','TOP_M'))
     p.add_argument('--min-inliers',type=int,default=60)
     p.add_argument('--min-track',type=float,default=5.0,
                    help='median keyframes seeing the inlier map points (5: tuned on ONE bad stretch; unvalidated)')
     a=p.parse_args()
-    anchor=json.loads((a.work/'anchor.json').read_text());loc=json.loads((a.work/'localized.json').read_text())
+    if a.output.resolve()==a.video.resolve():p.error('Output must not overwrite the input video')
+    anchor=json.loads((a.work/'anchor.json').read_text())
+    loc=json.loads((a.localizations or a.work/'localized.json').read_text())
     camera=next(iter(pycolmap.Reconstruction(str(a.work/'sparse'/'0')).cameras.values()))
     mask=cv2.imread(str(a.work/'mask.png'),cv2.IMREAD_GRAYSCALE)
     unit=anchor['metres_per_unit'];world_from_plate=np.array(anchor['world_from_plate'])
@@ -110,7 +114,14 @@ def main():
     centre_plate=np.array([0.0,0.0,0.0])
     cap=cv2.VideoCapture(str(a.video));fps=cap.get(cv2.CAP_PROP_FPS)
     w,h=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if not cap.isOpened() or not np.isfinite(fps) or fps<=0:
+        cap.release();p.error('Cannot open query video with a valid frame rate')
+    if (w,h)!=(camera.width,camera.height) or mask is None or mask.shape!=(h,w):
+        cap.release();p.error('Query video and map mask must match the map camera resolution')
+    a.output.parent.mkdir(parents=True,exist_ok=True)
     out=cv2.VideoWriter(str(a.output),cv2.VideoWriter_fourcc(*'mp4v'),fps,(w,h))
+    if not out.isOpened():
+        cap.release();p.error('Cannot open output video')
     gate=Gate();stats={'reasons':{},'shown':0,'frames':0};slip=[];idx=0
     to_world=lambda X:np.c_[X,np.ones(len(X))]@M.T[:,:3]
     # Ground grid over the dirt in front of the plate (x +-3 m, 10 m toward the mound): wide
@@ -155,8 +166,8 @@ def main():
     if slip:
         s=np.array([v for _,v in slip]);stats['slip_px']={'frame_pairs':len(s),'median':round(float(np.median(s)),2),
                                           'p95':round(float(np.percentile(s,95)),2),'max':round(float(s.max()),2)}
-        (a.work/'slip.json').write_text(json.dumps(slip))
-    (a.work/'overlay_stats.json').write_text(json.dumps(stats,indent=1)+'\n')
+    (a.output.parent/'slip.json').write_text(json.dumps(slip))
+    (a.output.parent/'overlay_stats.json').write_text(json.dumps(stats,indent=1)+'\n')
     print(json.dumps(stats,indent=1))
 
 
