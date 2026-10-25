@@ -1,0 +1,61 @@
+{
+ "source": "iPhone 16 Pro Max HLG practice video (2026-10-21), 1080x1920 portrait, 30 fps",
+ "privacy": "people outside the plate area blurred; no faces visible",
+ "camera": {
+  "width": 1080,
+  "height": 1920,
+  "fx": 1450,
+  "fy": 1450,
+  "cx": 540,
+  "cy": 960,
+  "note": "UNCALIBRATED: focal length estimated from the plate itself, principal point assumed centered"
+ },
+ "fixtures": [
+  {
+   "file": "IMG_0749_tonemap_290.jpg",
+   "description": "clean plate, HLG tone-mapped",
+   "expect_plate": true,
+   "camera_position": [
+    0.0234,
+    1.3043,
+    1.456
+   ]
+  },
+  {
+   "file": "IMG_0749_raw_290.jpg",
+   "description": "same frame, HLG decoded raw (no tone map)",
+   "expect_plate": true,
+   "camera_position": [
+    0.0196,
+    1.3076,
+    1.4584
+   ]
+  },
+  {
+   "file": "IMG_0750_tonemap_60.jpg",
+   "description": "plate beside the catcher's glove, tone-mapped",
+   "expect_plate": true,
+   "camera_position": [
+    0.1125,
+    0.9999,
+    1.35
+   ]
+  },
+  {
+   "file": "IMG_0749_tonemap_60.jpg",
+   "description": "plate partly hidden by the catcher's head",
+   "expect_plate": false,
+   "camera_position": null
+  },
+  {
+   "file": "IMG_0749_tonemap_72.jpg",
+   "description": "plate plus a small bright sliver that once won on pixel error",
+   "expect_plate": true,
+   "camera_position": [
+    0.2049,
+    1.235,
+    1.2653
+   ]
+  }
+ ]
+}

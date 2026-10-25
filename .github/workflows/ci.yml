@@ -32,7 +32,12 @@ jobs:
           python-version: '3.12'
       - name: Install calibration and tracking dependencies
         run: pip install -r requirements-cv.txt
-      - name: Synthetic marker and stance tests
+      - name: Install ffmpeg (HDR tone mapping)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+          # The HDR tests skip without these filters; fail here instead of skipping silently.
+          ffmpeg -hide_banner -filters | grep -E ' (zscale|tonemap) ' | wc -l | grep -qx 2
+      - name: Marker, stance, practice-footage and HDR input tests
         run: python -m unittest discover -s tests_py -v
       - name: Python syntax validation
         run: python -m compileall -q autoumpire_cv tools/track_video.py tools/calibrate_camera.py tools/generate_marker.py tools/simulate_registration.py

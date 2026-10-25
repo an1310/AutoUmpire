@@ -65,9 +65,15 @@ python tools/track_video.py --input test.mp4 --config field.json \
 
 The tracking JSON provides **accepted** per-frame world-to-camera transforms, zone bounds and rejection statistics. It also records every processed frame's presentation time (`frame_times_s`, from the container, so variable-frame-rate video is handled); `review.html` matches playback to frames by these times. No tag visible = overlay absent. It makes a plausible pose from a *single planar reference*, not millimeter-accurate tracking. Marker tracking is the safer starting point than shape matching while catchers obscure the plate.
 
+### HDR input (phones, smart glasses)
+
+HDR video (HLG or PQ) is expected from phone and smart-glasses cameras. `track_video.py` detects it and decodes it through ffmpeg with an HDR→SDR tone map (needs ffmpeg built with `zscale`/libzimg, e.g. the Ubuntu `ffmpeg` package). OpenCV alone decodes HDR without tone mapping. On iPhone HLG practice footage that clipped highlights and washed the dirt toward the plate's white, and one clip yielded no plate at all. `--hdr raw` keeps the untone-mapped decode for comparison. The tracking JSON records `hdr` and `tonemapped`.
+
 ### Optional unmarked plate detection
 
-Add `--allow-plate-contour` to consider light-colored convex pentagon contours when the tag isn't observed. This detector can mistake white equipment or chalk for home plate; it assumes an unobstructed plate and a viewpoint from behind the catcher. **Use it for benchmark clips only; do not rely on it for game conditions.**
+Add `--allow-plate-contour` to estimate the pose from the plate's outline when no marker is seen. The plate is found by **relative** contrast: lighter and less colorful than the surrounding dirt. Absolute "white" thresholds fail on real, dirty plates under lights. Its poses pass the same continuity and re-acquisition gate as marker poses, so a source switch is shown only if it agrees with the last accepted pose.
+
+On two iPhone HLG practice clips (handheld, night, youth field, focal length estimated, not calibrated) it showed the zone on 162/400 and 21/182 frames, with no frame-to-frame jump over 10 cm; the previous detector found none. **The catcher hides the plate for most of a pitch**, and nearly all detections came between pitches. Plate-outline tracking can anchor a pose but cannot carry it through a pitch; on glasses, the device's own tracking must. It can also latch onto other bright shapes (a cap logo, a white sliver); the gate and size-relative ranking reject those seen so far. Not validated for game use.
 
 ## Batter-specific calibration
 
