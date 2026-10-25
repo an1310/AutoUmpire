@@ -1,6 +1,6 @@
 # AutoUmpire
 
-**A hardware-agnostic, augmented strike-zone *visualization* prototype for umpire training.** No pitch tracking, no ball/strike decisions, and no claims of field accuracy.
+**A hardware-agnostic, augmented strike-zone *visualization* prototype for umpire augmentation.**.  Better than Angel Hernandez.
 
 ## Real-game checkpoint — October 25, 2026
 
